@@ -1,0 +1,4 @@
+pyinstaller>=6.15
+pytest>=8.3
+pytest-cov>=5
+ruff>=0.9
