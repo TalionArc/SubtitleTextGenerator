@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,6 +15,8 @@ MIN_CUE_SECONDS = 1.0
 MAX_CUE_SECONDS = 6.0
 MIN_GAP_SECONDS = 0.05
 PAUSE_BREAK_SECONDS = 0.8
+TXT_PAUSE_BREAK_SECONDS = 1.5
+TXT_MAX_PARAGRAPH_CHARS = 240
 
 _ENDING_PUNCTUATION = frozenset(".!?。！？")
 _NO_SPACE_BEFORE = frozenset(",.!?;:%)]}。，！？：；、…")
@@ -21,13 +24,25 @@ _NO_SPACE_AFTER = frozenset("([{‘“")
 _TIMING_LINE = re.compile(
     r"^(\d{2,}):(\d{2}):(\d{2}),(\d{3}) --> (\d{2,}):(\d{2}):(\d{2}),(\d{3})$"
 )
+_TXT_TIMING_LINE = re.compile(
+    r"^\[(\d{2,}):(\d{2}):(\d{2})\.(\d{3}) - "
+    r"(\d{2,}):(\d{2}):(\d{2})\.(\d{3})\] (.+)$"
+)
 
 
 class SubtitleError(RuntimeError):
     pass
 
 
-class ExistingSubtitleError(SubtitleError):
+class ExistingOutputError(SubtitleError):
+    pass
+
+
+class ExistingSubtitleError(ExistingOutputError):
+    pass
+
+
+class ExistingTextOutputError(ExistingOutputError):
     pass
 
 
@@ -104,6 +119,40 @@ def render_srt(cues: list[Cue]) -> str:
     return "\r\n\r\n".join(blocks) + ("\r\n" if blocks else "")
 
 
+def render_txt(transcript: Transcript, *, include_timestamps: bool = True) -> str:
+    words = transcript_words(transcript)
+    if not words:
+        return ""
+    paragraphs: list[list[Word]] = []
+    current: list[Word] = []
+    for word in words:
+        if current:
+            candidate = join_word_text([*current, word])
+            long_pause = word.start - current[-1].end >= TXT_PAUSE_BREAK_SECONDS
+            if long_pause or len(candidate) > TXT_MAX_PARAGRAPH_CHARS:
+                paragraphs.append(current)
+                current = []
+        current.append(word)
+        if join_word_text(current).endswith(tuple(_ENDING_PUNCTUATION)):
+            paragraphs.append(current)
+            current = []
+    if current:
+        paragraphs.append(current)
+
+    lines: list[str] = []
+    for paragraph in paragraphs:
+        text = join_word_text(paragraph)
+        if not text:
+            continue
+        if include_timestamps:
+            start = format_txt_timestamp(paragraph[0].start)
+            end = format_txt_timestamp(paragraph[-1].end)
+            lines.append(f"[{start} - {end}] {text}")
+        else:
+            lines.append(text)
+    return "\r\n".join(lines) + ("\r\n" if lines else "")
+
+
 def validate_srt_text(text: str) -> None:
     normalized = text.lstrip("\ufeff").replace("\r\n", "\n")
     blocks = [block for block in normalized.strip().split("\n\n") if block.strip()]
@@ -128,17 +177,79 @@ def validate_srt_text(text: str) -> None:
         previous_end = end
 
 
+def validate_txt_text(text: str, *, timestamps: bool | None = None) -> None:
+    normalized = text.lstrip("\ufeff")
+    if not normalized.strip():
+        raise SubtitleError("텍스트 내용이 비어 있습니다.")
+    if "\x00" in normalized:
+        raise SubtitleError("텍스트 결과에 NUL 문자가 포함되어 있습니다.")
+    lines = [line for line in normalized.splitlines() if line.strip()]
+    if timestamps is True:
+        previous_start = -1.0
+        for index, line in enumerate(lines, 1):
+            match = _TXT_TIMING_LINE.fullmatch(line)
+            if not match:
+                raise SubtitleError(f"TXT 타임스탬프 형식 오류: {index}")
+            start = _match_seconds(match.groups()[:4])
+            end = _match_seconds(match.groups()[4:8])
+            if end <= start or start < previous_start:
+                raise SubtitleError(f"TXT 시간 순서 오류: {index}")
+            if not match.group(9).strip():
+                raise SubtitleError(f"TXT 본문 형식 오류: {index}")
+            previous_start = start
+
+
 def commit_srt(video: Path, cues: list[Cue], *, allow_replace: bool) -> Path:
     output = video.with_suffix(".srt")
-    if output.exists() and not allow_replace:
-        raise ExistingSubtitleError(f"이미 자막이 있습니다: {output.name}")
     text = render_srt(cues)
     validate_srt_text(text)
+    return _commit_text_output(
+        output,
+        text,
+        allow_replace=allow_replace,
+        validator=validate_srt_text,
+        existing_error=ExistingSubtitleError,
+    )
+
+
+def commit_txt(
+    audio: Path,
+    transcript: Transcript,
+    *,
+    allow_replace: bool,
+    include_timestamps: bool = True,
+) -> Path:
+    output = audio.with_suffix(".txt")
+    text = render_txt(transcript, include_timestamps=include_timestamps)
+    validate_txt_text(text, timestamps=include_timestamps)
+
+    def validate_output(candidate: str) -> None:
+        validate_txt_text(candidate, timestamps=include_timestamps)
+
+    return _commit_text_output(
+        output,
+        text,
+        allow_replace=allow_replace,
+        validator=validate_output,
+        existing_error=ExistingTextOutputError,
+    )
+
+
+def _commit_text_output(
+    output: Path,
+    text: str,
+    *,
+    allow_replace: bool,
+    validator: Callable[[str], None],
+    existing_error: type[ExistingOutputError],
+) -> Path:
+    if output.exists() and not allow_replace:
+        raise existing_error(f"이미 결과 파일이 있습니다: {output.name}")
     temporary = output.with_name(f".{output.name}.{os.getpid()}.tmp")
     temporary.write_bytes(text.encode("utf-8-sig"))
     try:
         written = temporary.read_text(encoding="utf-8-sig")
-        validate_srt_text(written)
+        validator(written)
         backup = output.with_suffix(output.suffix + ".bak")
         moved_original = False
         if output.exists():
@@ -162,6 +273,10 @@ def format_timestamp(seconds: float) -> str:
     minutes, remainder = divmod(remainder, 60_000)
     secs, millis = divmod(remainder, 1000)
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+
+def format_txt_timestamp(seconds: float) -> str:
+    return format_timestamp(seconds).replace(",", ".")
 
 
 def _should_break(current: list[Word], word: Word) -> bool:

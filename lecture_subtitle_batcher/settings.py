@@ -14,15 +14,20 @@ class Settings:
     root_directory: str = DEFAULT_ROOT
     glossary_text: str = ""
     window_geometry: str = "1120x720"
+    audio_txt_timestamps: bool = True
 
 
 def load_settings(paths: AppPaths) -> Settings:
     try:
         data = json.loads(paths.settings_file.read_text(encoding="utf-8"))
+        audio_txt_timestamps = data.get("audio_txt_timestamps", True)
+        if not isinstance(audio_txt_timestamps, bool):
+            audio_txt_timestamps = True
         return Settings(
             root_directory=str(data.get("root_directory") or DEFAULT_ROOT),
             glossary_text=str(data.get("glossary_text") or ""),
             window_geometry=str(data.get("window_geometry") or "1120x720"),
+            audio_txt_timestamps=audio_txt_timestamps,
         )
     except (OSError, ValueError, TypeError):
         return Settings()

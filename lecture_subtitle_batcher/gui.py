@@ -12,10 +12,10 @@ from .app_paths import AppPaths
 from .constants import APP_DISPLAY_NAME, APP_VERSION, ENGINE_VERSION
 from .controller import BatchController, ControllerEvent
 from .engine import EngineRunner
-from .models import JobMode, JobRequest, JobStatus, VideoEntry
+from .models import JobMode, JobRequest, JobStatus, MediaEntry, MediaKind
 from .processor import JobProcessor
 from .runtime import RuntimeManager
-from .scanner import matching_subtitles, scan_videos
+from .scanner import matching_outputs, scan_media
 from .settings import Settings, normalize_glossary, save_settings, valid_root_directory
 
 
@@ -27,7 +27,7 @@ class SubtitleBatcherApp:
         self.paths = paths
         self.settings = settings
         self.events: queue.Queue[ControllerEvent] = queue.Queue()
-        self.entries: dict[str, VideoEntry] = {}
+        self.entries: dict[str, MediaEntry] = {}
         self.selected: set[str] = set()
         self.ready = False
 
@@ -64,12 +64,12 @@ class SubtitleBatcherApp:
         notebook.pack(fill=tk.BOTH, expand=True)
         work_tab = ttk.Frame(notebook, padding=8)
         settings_tab = ttk.Frame(notebook, padding=12)
-        notebook.add(work_tab, text="영상 작업")
+        notebook.add(work_tab, text="미디어 작업")
         notebook.add(settings_tab, text="용어집 / 설정")
 
         folder_row = ttk.Frame(work_tab)
         folder_row.pack(fill=tk.X, pady=(0, 8))
-        ttk.Label(folder_row, text="강의 폴더").pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Label(folder_row, text="미디어 폴더").pack(side=tk.LEFT, padx=(0, 8))
         self.root_var = tk.StringVar(value=self.settings.root_directory)
         self.root_entry = ttk.Entry(folder_row, textvariable=self.root_var)
         self.root_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -80,35 +80,61 @@ class SubtitleBatcherApp:
         selection_row.pack(fill=tk.X, pady=(0, 8))
         ttk.Button(
             selection_row,
-            text="자막 없는 영상 모두 선택",
-            command=self._select_without_subtitles,
+            text="결과 없는 파일 모두 선택",
+            command=self._select_without_outputs,
         ).pack(side=tk.LEFT)
         ttk.Button(selection_row, text="선택 해제", command=self._clear_selection).pack(
             side=tk.LEFT, padx=5
         )
-        self.count_var = tk.StringVar(value="영상 0개 / 선택 0개")
+        self.count_var = tk.StringVar(value="전체 0개 / 선택 0개")
         ttk.Label(selection_row, textvariable=self.count_var).pack(side=tk.RIGHT)
+
+        output_option_row = ttk.Frame(work_tab)
+        output_option_row.pack(fill=tk.X, pady=(0, 8))
+        self.audio_timestamp_var = tk.BooleanVar(value=self.settings.audio_txt_timestamps)
+        self.audio_timestamp_check = ttk.Checkbutton(
+            output_option_row,
+            text="오디오 TXT에 타임스탬프 포함",
+            variable=self.audio_timestamp_var,
+        )
+        self.audio_timestamp_check.pack(side=tk.LEFT)
+        ttk.Label(
+            output_option_row,
+            text="예: [00:01:23.456 - 00:01:28.900] (영상 SRT에는 영향 없음)",
+        ).pack(side=tk.LEFT, padx=(8, 0))
 
         tree_frame = ttk.Frame(work_tab)
         tree_frame.pack(fill=tk.BOTH, expand=True)
-        columns = ("selected", "status", "folder", "name", "subtitle", "stage", "elapsed", "message")
+        columns = (
+            "selected",
+            "kind",
+            "status",
+            "folder",
+            "name",
+            "output",
+            "stage",
+            "elapsed",
+            "message",
+        )
         self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="browse")
         headings = {
             "selected": "선택",
+            "kind": "종류",
             "status": "상태",
             "folder": "상대 폴더",
             "name": "파일명",
-            "subtitle": "기존 자막",
+            "output": "기존 결과",
             "stage": "처리 단계",
             "elapsed": "경과",
             "message": "메시지",
         }
         widths = {
             "selected": 45,
+            "kind": 60,
             "status": 105,
             "folder": 145,
             "name": 230,
-            "subtitle": 90,
+            "output": 90,
             "stage": 135,
             "elapsed": 65,
             "message": 260,
@@ -207,17 +233,17 @@ class SubtitleBatcherApp:
     def _scan(self) -> None:
         root_path = valid_root_directory(self.root_var.get())
         if root_path is None:
-            self.status_var.set("강의 폴더를 찾을 수 없습니다.")
+            self.status_var.set("미디어 폴더를 찾을 수 없습니다.")
             return
         self.settings.root_directory = str(root_path)
         self.entries.clear()
         self.selected.clear()
         self.tree.delete(*self.tree.get_children())
-        for entry in scan_videos(root_path):
+        for entry in scan_media(root_path):
             iid = self._iid(entry.path)
             self.entries[iid] = entry
             self.tree.insert("", tk.END, iid=iid, values=self._row_values(iid, entry))
-        self.status_var.set(f"영상 {len(self.entries)}개 검색 완료")
+        self.status_var.set(f"미디어 {len(self.entries)}개 검색 완료")
         self._update_count()
 
     def _browse(self) -> None:
@@ -226,8 +252,8 @@ class SubtitleBatcherApp:
             self.root_var.set(selected)
             self._scan()
 
-    def _select_without_subtitles(self) -> None:
-        self.selected = {iid for iid, entry in self.entries.items() if not entry.has_subtitle}
+    def _select_without_outputs(self) -> None:
+        self.selected = {iid for iid, entry in self.entries.items() if not entry.has_output}
         self._refresh_checks()
 
     def _clear_selection(self) -> None:
@@ -262,22 +288,25 @@ class SubtitleBatcherApp:
             return
         ordered = [iid for iid in self.tree.get_children() if iid in self.selected]
         if not ordered:
-            messagebox.showinfo(APP_DISPLAY_NAME, "처리할 영상을 먼저 선택하세요.")
+            messagebox.showinfo(APP_DISPLAY_NAME, "처리할 미디어 파일을 먼저 선택하세요.")
             return
         if mode in {JobMode.REPROCESS, JobMode.FULL_LARGE}:
             label = "전체 large-v3로 재생성" if mode is JobMode.FULL_LARGE else "재생성"
             if not messagebox.askokcancel(
                 APP_DISPLAY_NAME,
-                f"선택한 {len(ordered)}개 영상을 {label}합니다.\n기존 SRT는 .srt.bak 하나로 교체됩니다.",
+                f"선택한 {len(ordered)}개 파일을 {label}합니다.\n"
+                "기존 SRT/TXT는 각각 .bak 하나로 교체됩니다.",
             ):
                 return
         glossary = normalize_glossary(self.glossary_text.get("1.0", "end-1c"))
+        audio_txt_timestamps = bool(self.audio_timestamp_var.get())
         jobs = [
             JobRequest(
                 video=self.entries[iid].path,
                 root=self.entries[iid].root,
                 mode=mode,
                 glossary=glossary,
+                audio_txt_timestamps=audio_txt_timestamps,
             )
             for iid in ordered
         ]
@@ -356,7 +385,7 @@ class SubtitleBatcherApp:
             entry.message = event.message
         if event.result:
             entry.elapsed_seconds = event.result.elapsed_seconds
-            entry.existing_subtitles = matching_subtitles(entry.path)
+            entry.existing_outputs = matching_outputs(entry.path)
             if event.result.status in {
                 JobStatus.COMPLETE,
                 JobStatus.REVIEW,
@@ -383,6 +412,7 @@ class SubtitleBatcherApp:
             self.full_large_button,
         ):
             button.configure(state=state)
+        self.audio_timestamp_check.configure(state=state)
 
     def _refresh_checks(self) -> None:
         for iid in self.entries:
@@ -394,26 +424,32 @@ class SubtitleBatcherApp:
         if entry and self.tree.exists(iid):
             self.tree.item(iid, values=self._row_values(iid, entry))
 
-    def _row_values(self, iid: str, entry: VideoEntry) -> tuple[str, ...]:
-        subtitle = "없음"
-        if entry.existing_subtitles:
-            extensions = ", ".join(sorted({path.suffix.lstrip(".").upper() for path in entry.existing_subtitles}))
-            subtitle = f"있음 ({extensions})"
+    def _row_values(self, iid: str, entry: MediaEntry) -> tuple[str, ...]:
+        output = "없음"
+        if entry.existing_outputs:
+            extensions = ", ".join(
+                sorted({path.suffix.lstrip(".").upper() for path in entry.existing_outputs})
+            )
+            output = f"있음 ({extensions})"
         return (
             "☑" if iid in self.selected else "☐",
+            entry.kind.value,
             entry.status.value,
             entry.relative_parent,
             entry.path.name,
-            subtitle,
+            output,
             entry.stage,
             _format_elapsed(entry.elapsed_seconds),
             entry.message,
         )
 
     def _update_count(self) -> None:
-        missing = sum(not entry.has_subtitle for entry in self.entries.values())
+        missing = sum(not entry.has_output for entry in self.entries.values())
+        video_count = sum(entry.kind is MediaKind.VIDEO for entry in self.entries.values())
+        audio_count = sum(entry.kind is MediaKind.AUDIO for entry in self.entries.values())
         self.count_var.set(
-            f"영상 {len(self.entries)}개 / 자막 없음 {missing}개 / 선택 {len(self.selected)}개"
+            f"전체 {len(self.entries)}개 (영상 {video_count} / 오디오 {audio_count}) / "
+            f"결과 없음 {missing}개 / 선택 {len(self.selected)}개"
         )
 
     def _update_glossary_count(self) -> None:
@@ -430,6 +466,7 @@ class SubtitleBatcherApp:
         self.settings.root_directory = self.root_var.get().strip()
         self.settings.glossary_text = self.glossary_text.get("1.0", "end-1c")
         self.settings.window_geometry = self.root.geometry()
+        self.settings.audio_txt_timestamps = bool(self.audio_timestamp_var.get())
         with suppress(OSError):
             save_settings(self.paths, self.settings)
         self.root.destroy()

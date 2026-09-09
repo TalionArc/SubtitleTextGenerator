@@ -8,10 +8,15 @@ from lecture_subtitle_batcher.models import Segment, Transcript, Word
 from lecture_subtitle_batcher.subtitles import (
     Cue,
     ExistingSubtitleError,
+    ExistingTextOutputError,
+    SubtitleError,
     commit_srt,
+    commit_txt,
     cues_from_transcript,
     render_srt,
+    render_txt,
     validate_srt_text,
+    validate_txt_text,
 )
 
 
@@ -59,3 +64,53 @@ def test_commit_refuses_unapproved_overwrite(tmp_path: Path) -> None:
     commit_srt(video, [Cue(0, 1, "one")], allow_replace=False)
     with pytest.raises(ExistingSubtitleError):
         commit_srt(video, [Cue(0, 1, "two")], allow_replace=False)
+
+
+def test_audio_txt_can_include_or_omit_timestamps() -> None:
+    timestamped = render_txt(_transcript())
+    validate_txt_text(timestamped, timestamps=True)
+    assert timestamped.splitlines() == [
+        "[00:00:00.000 - 00:00:02.000] 안녕하세요 강의를 시작합니다.",
+        "[00:00:03.000 - 00:00:05.000] 이것은 두번째 문장입니다.",
+    ]
+
+    plain = render_txt(_transcript(), include_timestamps=False)
+    validate_txt_text(plain, timestamps=False)
+    assert "00:00:" not in plain
+    assert plain.splitlines() == ["안녕하세요 강의를 시작합니다.", "이것은 두번째 문장입니다."]
+
+
+def test_audio_txt_timestamp_validation_rejects_bad_order() -> None:
+    with pytest.raises(SubtitleError, match="시간 순서"):
+        validate_txt_text(
+            "[00:00:02.000 - 00:00:01.000] 잘못된 구간\r\n",
+            timestamps=True,
+        )
+
+
+def test_commit_txt_writes_bom_and_keeps_one_backup(tmp_path: Path) -> None:
+    audio = tmp_path / "녹음 [1].m4a"
+    audio.write_bytes(b"original audio")
+    first = _transcript()
+    second = Transcript(
+        [Segment(0.0, 1.0, "", [Word(0.0, 1.0, " 두 번째 결과입니다.", 0.9)])],
+        duration=1.0,
+    )
+    third = Transcript(
+        [Segment(0.0, 1.0, "", [Word(0.0, 1.0, " 세 번째 결과입니다.", 0.9)])],
+        duration=1.0,
+    )
+
+    output = commit_txt(audio, first, allow_replace=False)
+    assert output.read_bytes().startswith(b"\xef\xbb\xbf")
+    assert b"\r\n" in output.read_bytes()
+    assert output.read_text(encoding="utf-8-sig").startswith("[00:00:00.000 - ")
+    with pytest.raises(ExistingTextOutputError):
+        commit_txt(audio, second, allow_replace=False)
+    commit_txt(audio, second, allow_replace=True)
+    backup = tmp_path / "녹음 [1].txt.bak"
+    assert "안녕하세요" in backup.read_text(encoding="utf-8-sig")
+    commit_txt(audio, third, allow_replace=True)
+    assert "두 번째" in backup.read_text(encoding="utf-8-sig")
+    assert len(list(tmp_path.glob("*.bak"))) == 1
+    assert audio.read_bytes() == b"original audio"

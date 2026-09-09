@@ -23,13 +23,19 @@ class JobStatus(StrEnum):
     CANCELLED = "취소됨"
 
 
+class MediaKind(StrEnum):
+    VIDEO = "영상"
+    AUDIO = "오디오"
+
+
 @dataclass(slots=True)
-class VideoEntry:
+class MediaEntry:
     path: Path
     root: Path
     size: int
     mtime_ns: int
-    existing_subtitles: tuple[Path, ...] = ()
+    kind: MediaKind
+    existing_outputs: tuple[Path, ...] = ()
     status: JobStatus = JobStatus.WAITING
     stage: str = ""
     elapsed_seconds: float = 0.0
@@ -44,8 +50,26 @@ class VideoEntry:
         return "." if str(parent) in {"", "."} else str(parent)
 
     @property
+    def has_output(self) -> bool:
+        return bool(self.existing_outputs)
+
+    @property
     def has_subtitle(self) -> bool:
-        return bool(self.existing_subtitles)
+        """Compatibility alias for the 1.1 video-only entry API."""
+        return self.has_output
+
+    @property
+    def existing_subtitles(self) -> tuple[Path, ...]:
+        """Compatibility alias for the 1.1 video-only entry API."""
+        return self.existing_outputs
+
+    @existing_subtitles.setter
+    def existing_subtitles(self, value: tuple[Path, ...]) -> None:
+        self.existing_outputs = value
+
+
+# 1.1 내부 API를 사용하던 코드와의 호환용 별칭입니다.
+VideoEntry = MediaEntry
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,13 +124,14 @@ class JobRequest:
     root: Path
     mode: JobMode
     glossary: tuple[str, ...] = ()
+    audio_txt_timestamps: bool = True
 
 
 @dataclass(slots=True)
 class JobResult:
     video: Path
     status: JobStatus
-    srt_path: Path | None = None
+    output_path: Path | None = None
     message: str = ""
     uncertain_ratio: float = 0.0
     elapsed_seconds: float = 0.0

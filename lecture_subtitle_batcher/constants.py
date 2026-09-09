@@ -4,11 +4,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 APP_NAME = "LectureSubtitleBatcher"
-APP_DISPLAY_NAME = "강의 자막 생성기"
-APP_VERSION = "1.1.0"
+APP_DISPLAY_NAME = "강의 자막·텍스트 생성기"
+APP_VERSION = "1.2.1"
 
 DEFAULT_ROOT = str(Path.home() / "Desktop" / "강의")
-MEDIA_EXTENSIONS = frozenset({".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".wmv", ".ts"})
+VIDEO_EXTENSIONS = frozenset(
+    {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".wmv", ".ts"}
+)
+AUDIO_EXTENSIONS = frozenset(
+    {".m4a", ".mp3", ".wav", ".flac", ".aac", ".ogg", ".opus", ".wma", ".aif", ".aiff", ".mka"}
+)
+MEDIA_EXTENSIONS = VIDEO_EXTENSIONS | AUDIO_EXTENSIONS
 SUBTITLE_EXTENSIONS = frozenset({".srt", ".vtt", ".ass", ".ssa"})
 
 ENGINE_VERSION = "r245.4"

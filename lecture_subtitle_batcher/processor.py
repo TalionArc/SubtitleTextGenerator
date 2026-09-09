@@ -11,7 +11,7 @@ from pathlib import Path
 from .app_paths import AppPaths
 from .constants import APP_VERSION, LARGE_MODEL, TURBO_MODEL
 from .engine import EngineCancelled, EngineExecutionError, EngineRun, EngineRunner, clip_argument
-from .models import JobMode, JobRequest, JobResult, JobStatus, RefineWindow, Transcript
+from .models import JobMode, JobRequest, JobResult, JobStatus, MediaKind, RefineWindow, Transcript
 from .quality import (
     REVIEW_RATIO_THRESHOLD,
     build_refine_windows,
@@ -19,8 +19,8 @@ from .quality import (
     uncertain_ratio,
 )
 from .runtime import RuntimeManager
-from .scanner import matching_subtitles
-from .subtitles import commit_srt, cues_from_transcript
+from .scanner import matching_outputs, media_kind
+from .subtitles import commit_srt, commit_txt, cues_from_transcript
 from .transcript import TranscriptError, load_transcript, transcript_is_valid
 
 StageCallback = Callable[[str, str, float | None], None]
@@ -32,7 +32,7 @@ class SourceChangedError(RuntimeError):
 
 
 class JobProcessor:
-    PIPELINE_VERSION = 1
+    PIPELINE_VERSION = 2
 
     def __init__(self, paths: AppPaths, runtime: RuntimeManager, engine: EngineRunner) -> None:
         self.paths = paths
@@ -47,19 +47,21 @@ class JobProcessor:
         progress: StageCallback,
     ) -> JobResult:
         started = time.monotonic()
-        video = request.video.resolve()
-        source_stat = video.stat()
-        if request.mode is JobMode.ADAPTIVE and matching_subtitles(video):
+        source = request.video.resolve()
+        source_kind = media_kind(source)
+        source_stat = source.stat()
+        if request.mode is JobMode.ADAPTIVE and matching_outputs(source):
+            output_label = "TXT" if source_kind is MediaKind.AUDIO else "자막"
             return JobResult(
-                video=video,
+                video=source,
                 status=JobStatus.SKIPPED,
-                message="기존 자막이 있어 건너뛰었습니다.",
+                message=f"기존 {output_label} 결과가 있어 건너뛰었습니다.",
                 elapsed_seconds=time.monotonic() - started,
             )
         if not self.runtime.ready():
             raise RuntimeError("인식 엔진 설치가 완료되지 않았습니다.")
 
-        job_id = job_identity(video, source_stat.st_size, source_stat.st_mtime_ns)
+        job_id = job_identity(source, source_stat.st_size, source_stat.st_mtime_ns)
         job_dir = self.paths.jobs / job_id
         job_dir.mkdir(parents=True, exist_ok=True)
         metadata = self._metadata(request, source_stat.st_size, source_stat.st_mtime_ns)
@@ -70,9 +72,9 @@ class JobProcessor:
         warning = ""
         ratio = 0.0
         if request.mode is JobMode.FULL_LARGE:
-            progress("전체 large-v3", "전체 영상을 large-v3로 인식합니다.", 0.0)
+            progress("전체 large-v3", "전체 파일을 large-v3로 인식합니다.", 0.0)
             final_transcript = self._run_cached_full_large(
-                video,
+                source,
                 request,
                 job_dir,
                 cache_matches,
@@ -81,11 +83,11 @@ class JobProcessor:
                 progress,
             )
             status = JobStatus.COMPLETE
-            message = "전체 large-v3 자막 생성 완료"
+            message = "전체 large-v3 인식 완료"
         else:
             progress("Turbo 초안", "Turbo 초안을 준비합니다.", 0.0)
             turbo = self._run_cached_turbo(
-                video,
+                source,
                 request,
                 job_dir,
                 cache_matches,
@@ -106,7 +108,7 @@ class JobProcessor:
                 )
                 try:
                     refined = self._run_refinement(
-                        video,
+                        source,
                         request,
                         job_dir,
                         log_path,
@@ -136,23 +138,30 @@ class JobProcessor:
 
         if cancelled():
             raise EngineCancelled("사용자가 작업을 중지했습니다.")
-        self._verify_source_unchanged(video, source_stat.st_size, source_stat.st_mtime_ns)
-        progress("SRT 생성", "단어 타임스탬프를 자막 큐로 정리합니다.", None)
-        cues = cues_from_transcript(final_transcript)
-        if not cues:
-            raise RuntimeError("음성이 인식되지 않아 SRT를 만들 수 없습니다.")
-        srt_path = commit_srt(
-            video,
-            cues,
-            allow_replace=request.mode in {JobMode.REPROCESS, JobMode.FULL_LARGE},
-        )
-        self._verify_source_unchanged(video, source_stat.st_size, source_stat.st_mtime_ns)
+        self._verify_source_unchanged(source, source_stat.st_size, source_stat.st_mtime_ns)
+        allow_replace = request.mode in {JobMode.REPROCESS, JobMode.FULL_LARGE}
+        if source_kind is MediaKind.AUDIO:
+            timestamp_label = "타임스탬프 포함" if request.audio_txt_timestamps else "타임스탬프 제외"
+            progress("TXT 생성", f"인식 결과를 {timestamp_label} 텍스트로 정리합니다.", None)
+            output_path = commit_txt(
+                source,
+                final_transcript,
+                allow_replace=allow_replace,
+                include_timestamps=request.audio_txt_timestamps,
+            )
+        else:
+            progress("SRT 생성", "단어 타임스탬프를 자막 큐로 정리합니다.", None)
+            cues = cues_from_transcript(final_transcript)
+            if not cues:
+                raise RuntimeError("음성이 인식되지 않아 SRT를 만들 수 없습니다.")
+            output_path = commit_srt(source, cues, allow_replace=allow_replace)
+        self._verify_source_unchanged(source, source_stat.st_size, source_stat.st_mtime_ns)
         elapsed = time.monotonic() - started
         progress("완료", message, 1.0)
         return JobResult(
-            video=video,
+            video=source,
             status=status,
-            srt_path=srt_path,
+            output_path=output_path,
             message=message,
             uncertain_ratio=ratio,
             elapsed_seconds=elapsed,
@@ -296,7 +305,17 @@ class JobProcessor:
     @staticmethod
     def _metadata_matches(path: Path, expected: dict[str, object]) -> bool:
         try:
-            return json.loads(path.read_text(encoding="utf-8")) == expected
+            actual = json.loads(path.read_text(encoding="utf-8"))
+            recognition_keys = (
+                "pipeline_version",
+                "source",
+                "size",
+                "mtime_ns",
+                "glossary_sha256",
+            )
+            return isinstance(actual, dict) and all(
+                actual.get(key) == expected.get(key) for key in recognition_keys
+            )
         except (OSError, ValueError, TypeError):
             return False
 
@@ -323,7 +342,7 @@ class JobProcessor:
     def _verify_source_unchanged(video: Path, size: int, mtime_ns: int) -> None:
         stat = video.stat()
         if stat.st_size != size or stat.st_mtime_ns != mtime_ns:
-            raise SourceChangedError("처리 중 원본 영상이 변경되어 자막 저장을 중단했습니다.")
+            raise SourceChangedError("처리 중 원본 미디어가 변경되어 결과 저장을 중단했습니다.")
 
     @staticmethod
     def _safe_remove_run_dir(path: Path, job_dir: Path) -> None:

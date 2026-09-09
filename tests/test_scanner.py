@@ -2,7 +2,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from lecture_subtitle_batcher.scanner import matching_subtitles, scan_videos
+import pytest
+
+from lecture_subtitle_batcher.constants import AUDIO_EXTENSIONS
+from lecture_subtitle_batcher.models import MediaKind
+from lecture_subtitle_batcher.scanner import (
+    matching_outputs,
+    matching_subtitles,
+    scan_media,
+    scan_videos,
+)
 
 
 def test_matching_subtitles_exact_and_language_suffix(tmp_path: Path) -> None:
@@ -42,3 +51,31 @@ def test_scan_ignores_non_media_files(tmp_path: Path) -> None:
     (tmp_path / "notes.txt").write_text("x", encoding="utf-8")
     (tmp_path / "movie.MP4").write_bytes(b"x")
     assert [entry.path.name for entry in scan_videos(tmp_path)] == ["movie.MP4"]
+
+
+def test_audio_txt_output_detection_is_separate_from_video_subtitles(tmp_path: Path) -> None:
+    audio = tmp_path / "인터뷰.1.m4a"
+    audio.write_bytes(b"audio")
+    exact = tmp_path / "인터뷰.1.txt"
+    korean = tmp_path / "인터뷰.1.ko-KR.txt"
+    unrelated = tmp_path / "인터뷰.1.notes.txt"
+    subtitle = tmp_path / "인터뷰.1.srt"
+    backup = tmp_path / "인터뷰.1.txt.bak"
+    for path in (exact, korean, unrelated, subtitle, backup):
+        path.write_text("x", encoding="utf-8")
+
+    assert matching_outputs(audio) == tuple(
+        sorted((exact, korean), key=lambda item: item.name.casefold())
+    )
+
+
+@pytest.mark.parametrize("extension", sorted(AUDIO_EXTENSIONS))
+def test_scan_supports_common_audio_extensions(tmp_path: Path, extension: str) -> None:
+    audio = tmp_path / f"recording{extension.upper()}"
+    audio.write_bytes(b"audio")
+
+    entries = scan_media(tmp_path)
+
+    assert len(entries) == 1
+    assert entries[0].path.name == audio.name
+    assert entries[0].kind is MediaKind.AUDIO

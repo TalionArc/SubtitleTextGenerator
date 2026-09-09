@@ -21,9 +21,21 @@ def test_glossary_deduplicates_and_enforces_limits() -> None:
 
 def test_settings_round_trip(tmp_path: Path) -> None:
     paths = AppPaths(tmp_path / "app")
-    expected = Settings(root_directory=str(tmp_path), glossary_text="용어", window_geometry="1000x700")
+    expected = Settings(
+        root_directory=str(tmp_path),
+        glossary_text="용어",
+        window_geometry="1000x700",
+        audio_txt_timestamps=False,
+    )
     save_settings(paths, expected)
     assert load_settings(paths) == expected
+
+
+def test_old_settings_default_audio_timestamps_on(tmp_path: Path) -> None:
+    paths = AppPaths(tmp_path / "app")
+    paths.ensure_base_dirs()
+    paths.settings_file.write_text('{"root_directory": "C:/media"}', encoding="utf-8")
+    assert load_settings(paths).audio_txt_timestamps is True
 
 
 def test_corrupt_settings_fall_back_to_defaults(tmp_path: Path) -> None:

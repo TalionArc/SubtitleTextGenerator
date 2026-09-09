@@ -49,8 +49,19 @@ class FakeEngine:
         return None
 
 
-def _request(video: Path, mode: JobMode = JobMode.ADAPTIVE) -> JobRequest:
-    return JobRequest(video=video, root=video.parent, mode=mode, glossary=("Whisper",))
+def _request(
+    video: Path,
+    mode: JobMode = JobMode.ADAPTIVE,
+    *,
+    audio_txt_timestamps: bool = True,
+) -> JobRequest:
+    return JobRequest(
+        video=video,
+        root=video.parent,
+        mode=mode,
+        glossary=("Whisper",),
+        audio_txt_timestamps=audio_txt_timestamps,
+    )
 
 
 def _processor(tmp_path: Path, engine: FakeEngine) -> JobProcessor:
@@ -70,6 +81,14 @@ def test_adaptive_success_and_cache_resume(
     assert result.status is JobStatus.COMPLETE
     assert video.with_suffix(".srt").is_file()
     assert len(engine.calls) == 1
+
+    source_stat = video.stat()
+    meta_path = processor.paths.jobs / job_identity(
+        video, source_stat.st_size, source_stat.st_mtime_ns
+    ) / "meta.json"
+    old_metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+    old_metadata["app_version"] = "1.2.0"
+    meta_path.write_text(json.dumps(old_metadata), encoding="utf-8")
 
     result2 = processor.process(
         _request(video, JobMode.REPROCESS), cancelled=lambda: False, progress=lambda *_: None
@@ -196,4 +215,67 @@ def test_job_identity_uses_full_path_size_and_mtime(tmp_path: Path) -> None:
     right_stat = right.stat()
     assert job_identity(left, left_stat.st_size, left_stat.st_mtime_ns) != job_identity(
         right, right_stat.st_size, right_stat.st_mtime_ns
+    )
+
+
+def test_audio_adaptive_writes_timestamped_txt_not_srt(
+    tmp_path: Path, clean_transcript_payload: dict[str, object]
+) -> None:
+    audio = tmp_path / "회의 녹음.m4a"
+    audio.write_bytes(b"audio")
+    result = _processor(tmp_path, FakeEngine(clean_transcript_payload)).process(
+        _request(audio), cancelled=lambda: False, progress=lambda *_: None
+    )
+
+    output = audio.with_suffix(".txt")
+    text = output.read_text(encoding="utf-8-sig")
+    assert result.status is JobStatus.COMPLETE
+    assert result.output_path == output
+    assert output.is_file()
+    assert not audio.with_suffix(".srt").exists()
+    assert "안녕하세요" in text
+    assert text.startswith("[00:00:00.200 - 00:00:02.200] ")
+
+
+def test_audio_txt_can_disable_timestamps(
+    tmp_path: Path, clean_transcript_payload: dict[str, object]
+) -> None:
+    audio = tmp_path / "타임스탬프 제외.m4a"
+    audio.write_bytes(b"audio")
+    result = _processor(tmp_path, FakeEngine(clean_transcript_payload)).process(
+        _request(audio, audio_txt_timestamps=False),
+        cancelled=lambda: False,
+        progress=lambda *_: None,
+    )
+
+    text = audio.with_suffix(".txt").read_text(encoding="utf-8-sig")
+    assert result.status is JobStatus.COMPLETE
+    assert text.startswith("안녕하세요 강의를 시작합니다.")
+    assert "[00:00:" not in text
+
+
+def test_audio_existing_txt_skips_and_reprocess_creates_one_backup(
+    tmp_path: Path, clean_transcript_payload: dict[str, object]
+) -> None:
+    audio = tmp_path / "recording.m4a"
+    audio.write_bytes(b"audio")
+    output = audio.with_suffix(".txt")
+    output.write_text("사용자의 기존 텍스트", encoding="utf-8")
+    engine = FakeEngine(clean_transcript_payload)
+    processor = _processor(tmp_path, engine)
+
+    skipped = processor.process(
+        _request(audio), cancelled=lambda: False, progress=lambda *_: None
+    )
+    assert skipped.status is JobStatus.SKIPPED
+    assert not engine.calls
+
+    completed = processor.process(
+        _request(audio, JobMode.REPROCESS),
+        cancelled=lambda: False,
+        progress=lambda *_: None,
+    )
+    assert completed.status is JobStatus.COMPLETE
+    assert "사용자의 기존 텍스트" in audio.with_suffix(".txt.bak").read_text(
+        encoding="utf-8"
     )
