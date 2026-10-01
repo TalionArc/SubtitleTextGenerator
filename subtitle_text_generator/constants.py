@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 
-APP_NAME = "LectureSubtitleBatcher"
-APP_DISPLAY_NAME = "강의 자막·텍스트 생성기"
-APP_VERSION = "1.2.1"
+APP_NAME = "SubtitleTextGenerator"
+LEGACY_APP_NAME = "LectureSubtitleBatcher"
+APP_DISPLAY_NAME = "영상·녹음 자막 텍스트 생성기"
+APP_VERSION = "1.3.0"
 
-DEFAULT_ROOT = str(Path.home() / "Desktop" / "강의")
+DEFAULT_ROOT = ""
 VIDEO_EXTENSIONS = frozenset(
     {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".wmv", ".ts"}
 )
@@ -109,3 +109,9 @@ LARGE_MODEL = ModelManifest(
 )
 
 MODELS = (TURBO_MODEL, LARGE_MODEL)
+
+SETUP_DOWNLOAD_BYTES = ENGINE_ARCHIVE_SIZE + sum(
+    item.size for model in MODELS for item in model.files
+)
+# 압축을 푼 엔진, 두 모델, 복구용 엔진 압축본을 합친 실측 설치 크기는 약 10.1GiB입니다.
+SETUP_INSTALLED_BYTES = 10 * 1024**3

@@ -3,14 +3,14 @@ from __future__ import annotations
 from copy import deepcopy
 from pathlib import Path
 
-from lecture_subtitle_batcher.models import Segment, Transcript, Word
-from lecture_subtitle_batcher.quality import (
+from subtitle_text_generator.models import Segment, Transcript, Word
+from subtitle_text_generator.quality import (
     build_refine_windows,
     merge_refined_transcript,
     segment_uncertainty,
     uncertain_ratio,
 )
-from lecture_subtitle_batcher.transcript import load_transcript, transcript_is_valid
+from subtitle_text_generator.transcript import load_transcript, transcript_is_valid
 
 
 def test_load_standard_whisper_json(

@@ -3,13 +3,22 @@ from __future__ import annotations
 import hashlib
 import os
 import queue
+import shutil
 import tkinter as tk
 from contextlib import suppress
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+from tkinter import font as tkfont
 
 from .app_paths import AppPaths
-from .constants import APP_DISPLAY_NAME, APP_VERSION, ENGINE_VERSION
+from .constants import (
+    APP_DISPLAY_NAME,
+    APP_VERSION,
+    ENGINE_VERSION,
+    MIN_SETUP_FREE_BYTES,
+    SETUP_DOWNLOAD_BYTES,
+    SETUP_INSTALLED_BYTES,
+)
 from .controller import BatchController, ControllerEvent
 from .engine import EngineRunner
 from .models import JobMode, JobRequest, JobStatus, MediaEntry, MediaKind
@@ -17,6 +26,125 @@ from .processor import JobProcessor
 from .runtime import RuntimeManager
 from .scanner import matching_outputs, scan_media
 from .settings import Settings, normalize_glossary, save_settings, valid_root_directory
+
+MESSAGE_PREVIEW_CHARS = 120
+STATUS_PREVIEW_CHARS = 200
+TOOLTIP_MAX_CHARS = 1_500
+MESSAGE_MIN_WIDTH = 120
+CELL_PADDING = 24
+TOOLTIP_DELAY_MS = 600
+SETUP_PROMPT_DELAY_MS = 150
+SETUP_PENDING_MESSAGE = (
+    "인식 환경이 설치되지 않았습니다. '용어집 / 설정' 탭의 '환경 검사 / 복구'로 설치할 수 있습니다."
+)
+
+
+def single_line_preview(text: str, limit: int = MESSAGE_PREVIEW_CHARS) -> str:
+    flattened = " ".join(text.split())
+    if len(flattened) <= limit:
+        return flattened
+    return flattened[: limit - 1].rstrip() + "…"
+
+
+def format_gigabytes(size: int) -> str:
+    return f"{size / 1024**3:.1f}".rstrip("0").rstrip(".") + "GB"
+
+
+def setup_prompt_text(install_root: Path, free_bytes: int | None) -> str:
+    lines = [
+        f"· 다운로드: 약 {format_gigabytes(SETUP_DOWNLOAD_BYTES)} (인터넷 필요, 중단하면 다음에 이어받습니다)",
+        f"· 설치 후 사용 용량: 약 {format_gigabytes(SETUP_INSTALLED_BYTES)}",
+        f"· 필요한 여유 공간: {format_gigabytes(MIN_SETUP_FREE_BYTES)} 이상",
+        f"· 설치 위치: {install_root}",
+    ]
+    if free_bytes is not None:
+        lines.append(f"· 현재 여유 공간: {format_gigabytes(free_bytes)}")
+    lines.extend(
+        (
+            "",
+            "NVIDIA GPU(CUDA)가 있어야 인식할 수 있습니다.",
+            "'아니오'를 고르면 설치하지 않으며, '용어집 / 설정' 탭의 '환경 검사 / 복구'로 "
+            "나중에 설치할 수 있습니다.",
+        )
+    )
+    return "\n".join(lines)
+
+
+def entry_detail_text(entry: MediaEntry) -> str:
+    outputs = ", ".join(path.name for path in entry.existing_outputs) or "없음"
+    lines = [
+        f"파일: {entry.path}",
+        f"종류: {entry.kind.value}",
+        f"상태: {entry.status.value}",
+        f"처리 단계: {entry.stage or '-'}",
+        f"경과: {_format_elapsed(entry.elapsed_seconds) or '-'}",
+        f"기존 결과: {outputs}",
+        "",
+        "메시지:",
+        entry.message.strip() or "(메시지 없음)",
+    ]
+    return "\n".join(lines)
+
+
+class SetupPrompt:
+    def __init__(self, parent: tk.Misc, install_root: Path) -> None:
+        self.accepted = False
+        self.remember_decline = False
+        try:
+            free_bytes: int | None = shutil.disk_usage(install_root).free
+        except OSError:
+            free_bytes = None
+        self.window = tk.Toplevel(parent)
+        self.window.title(APP_DISPLAY_NAME)
+        self.window.resizable(False, False)
+        self.window.transient(parent)
+        self.window.protocol("WM_DELETE_WINDOW", self._close)
+        body = ttk.Frame(self.window, padding=16)
+        body.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(
+            body,
+            text="인식 엔진과 모델을 설치할까요?",
+            font=("Malgun Gothic", 11, "bold"),
+        ).pack(anchor=tk.W)
+        ttk.Label(
+            body,
+            text=setup_prompt_text(install_root, free_bytes),
+            justify=tk.LEFT,
+            wraplength="15c",
+        ).pack(anchor=tk.W, pady=(8, 12))
+        self.skip_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            body,
+            text="다시 표시하지 않기 ('아니오'를 고를 때만 적용)",
+            variable=self.skip_var,
+        ).pack(anchor=tk.W)
+        buttons = ttk.Frame(body)
+        buttons.pack(fill=tk.X, pady=(12, 0))
+        ttk.Button(buttons, text="아니오", command=self._decline).pack(side=tk.RIGHT)
+        accept = ttk.Button(buttons, text="예, 설치", style="Primary.TButton", command=self._accept)
+        accept.pack(side=tk.RIGHT, padx=(0, 6))
+        self.window.bind("<Escape>", lambda _event: self._close())
+        self.window.update_idletasks()
+        x = parent.winfo_rootx() + max((parent.winfo_width() - self.window.winfo_width()) // 2, 0)
+        y = parent.winfo_rooty() + max((parent.winfo_height() - self.window.winfo_height()) // 3, 0)
+        self.window.geometry(f"+{x}+{y}")
+        accept.focus_set()
+
+    def show(self) -> tuple[bool, bool]:
+        self.window.grab_set()
+        self.window.wait_window()
+        return self.accepted, self.remember_decline
+
+    def _accept(self) -> None:
+        self.accepted = True
+        self.window.destroy()
+
+    def _decline(self) -> None:
+        self.remember_decline = bool(self.skip_var.get())
+        self.window.destroy()
+
+    def _close(self) -> None:
+        self.window.destroy()
 
 
 class SubtitleBatcherApp:
@@ -30,6 +158,9 @@ class SubtitleBatcherApp:
         self.entries: dict[str, MediaEntry] = {}
         self.selected: set[str] = set()
         self.ready = False
+        self._tooltip: tk.Toplevel | None = None
+        self._tooltip_after: str | None = None
+        self._tooltip_iid = ""
 
         self.runtime = RuntimeManager(paths)
         self.engine = EngineRunner(self.runtime)
@@ -46,7 +177,7 @@ class SubtitleBatcherApp:
         self._build_ui()
         self._scan()
         self.root.after(self.POLL_MS, self._drain_events)
-        self.controller.start_setup()
+        self.root.after(SETUP_PROMPT_DELAY_MS, self._begin_setup)
 
     def _configure_style(self) -> None:
         style = ttk.Style(self.root)
@@ -55,6 +186,10 @@ class SubtitleBatcherApp:
         style.configure("Treeview", rowheight=25)
         style.configure("Primary.TButton", padding=(12, 6))
         style.configure("Danger.TButton", padding=(10, 6))
+        try:
+            self._tree_font = tkfont.nametofont(style.lookup("Treeview", "font") or "TkDefaultFont")
+        except tk.TclError:
+            self._tree_font = tkfont.nametofont("TkDefaultFont")
 
     def _build_ui(self) -> None:
         container = ttk.Frame(self.root, padding=10)
@@ -103,6 +238,50 @@ class SubtitleBatcherApp:
             text="예: [00:01:23.456 - 00:01:28.900] (영상 SRT에는 영향 없음)",
         ).pack(side=tk.LEFT, padx=(8, 0))
 
+        # 아래쪽 행을 먼저 배치해야 상태 문구가 여러 줄이 되어도 목록에 가려지지 않습니다.
+        progress_row = ttk.Frame(work_tab)
+        progress_row.pack(side=tk.BOTTOM, fill=tk.X, pady=(8, 0))
+        self.progress = ttk.Progressbar(progress_row, mode="determinate", maximum=100)
+        self.progress.pack(fill=tk.X)
+        self.status_var = tk.StringVar(value="시작 중")
+        self.status_label = ttk.Label(
+            progress_row, textvariable=self.status_var, anchor=tk.W, justify=tk.LEFT
+        )
+        self.status_label.pack(fill=tk.X, pady=(4, 0))
+        self.status_label.bind(
+            "<Configure>",
+            lambda event: self.status_label.configure(wraplength=max(event.width - 4, 1)),
+        )
+
+        action_row = ttk.Frame(work_tab)
+        action_row.pack(side=tk.BOTTOM, fill=tk.X, pady=(9, 0))
+        self.generate_button = ttk.Button(
+            action_row,
+            text="선택 생성 (Turbo → 보정)",
+            style="Primary.TButton",
+            command=lambda: self._start_selected(JobMode.ADAPTIVE),
+        )
+        self.generate_button.pack(side=tk.LEFT)
+        self.reprocess_button = ttk.Button(
+            action_row,
+            text="선택 재생성",
+            command=lambda: self._start_selected(JobMode.REPROCESS),
+        )
+        self.reprocess_button.pack(side=tk.LEFT, padx=5)
+        self.full_large_button = ttk.Button(
+            action_row,
+            text="선택 전체 large-v3",
+            command=lambda: self._start_selected(JobMode.FULL_LARGE),
+        )
+        self.full_large_button.pack(side=tk.LEFT)
+        self.stop_button = ttk.Button(
+            action_row, text="중지", style="Danger.TButton", command=self.controller.cancel
+        )
+        self.stop_button.pack(side=tk.RIGHT)
+        ttk.Label(action_row, text="행을 더블클릭하면 전체 메시지를 볼 수 있습니다.").pack(
+            side=tk.RIGHT, padx=(0, 12)
+        )
+
         tree_frame = ttk.Frame(work_tab)
         tree_frame.pack(fill=tk.BOTH, expand=True)
         columns = (
@@ -137,11 +316,13 @@ class SubtitleBatcherApp:
             "output": 90,
             "stage": 135,
             "elapsed": 65,
-            "message": 260,
+            "message": MESSAGE_MIN_WIDTH,
         }
+        # stretch 열이 있으면 Tk가 열 폭 합계를 목록 폭에 맞춰 줄여서 가로 스크롤이 메시지 끝까지
+        # 가지 못합니다. 폭을 고정하고 메시지 열만 내용과 남는 공간에 맞춰 직접 조절합니다.
         for column in columns:
             self.tree.heading(column, text=headings[column])
-            self.tree.column(column, width=widths[column], minwidth=40, stretch=column in {"folder", "name", "message"})
+            self.tree.column(column, width=widths[column], minwidth=40, stretch=False)
         vertical = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.tree.yview)
         horizontal = ttk.Scrollbar(tree_frame, orient=tk.HORIZONTAL, command=self.tree.xview)
         self.tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
@@ -151,42 +332,12 @@ class SubtitleBatcherApp:
         tree_frame.rowconfigure(0, weight=1)
         tree_frame.columnconfigure(0, weight=1)
         self.tree.bind("<Button-1>", self._tree_click)
+        self.tree.bind("<Double-Button-1>", self._tree_double_click)
         self.tree.bind("<space>", self._tree_space)
-
-        action_row = ttk.Frame(work_tab)
-        action_row.pack(fill=tk.X, pady=(9, 0))
-        self.generate_button = ttk.Button(
-            action_row,
-            text="선택 생성 (Turbo → 보정)",
-            style="Primary.TButton",
-            command=lambda: self._start_selected(JobMode.ADAPTIVE),
-        )
-        self.generate_button.pack(side=tk.LEFT)
-        self.reprocess_button = ttk.Button(
-            action_row,
-            text="선택 재생성",
-            command=lambda: self._start_selected(JobMode.REPROCESS),
-        )
-        self.reprocess_button.pack(side=tk.LEFT, padx=5)
-        self.full_large_button = ttk.Button(
-            action_row,
-            text="선택 전체 large-v3",
-            command=lambda: self._start_selected(JobMode.FULL_LARGE),
-        )
-        self.full_large_button.pack(side=tk.LEFT)
-        self.stop_button = ttk.Button(
-            action_row, text="중지", style="Danger.TButton", command=self.controller.cancel
-        )
-        self.stop_button.pack(side=tk.RIGHT)
-
-        progress_row = ttk.Frame(work_tab)
-        progress_row.pack(fill=tk.X, pady=(8, 0))
-        self.progress = ttk.Progressbar(progress_row, mode="determinate", maximum=100)
-        self.progress.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.status_var = tk.StringVar(value="시작 중")
-        ttk.Label(progress_row, textvariable=self.status_var, width=48, anchor=tk.W).pack(
-            side=tk.LEFT, padx=(8, 0)
-        )
+        self.tree.bind("<Configure>", lambda _event: self._fit_message_column())
+        self.tree.bind("<Motion>", self._tree_motion)
+        for sequence in ("<Leave>", "<ButtonPress>", "<MouseWheel>", "<Key>"):
+            self.tree.bind(sequence, lambda _event: self._hide_tooltip(), add="+")
 
         ttk.Label(
             settings_tab,
@@ -216,7 +367,7 @@ class SubtitleBatcherApp:
         environment.pack(fill=tk.X)
         ttk.Label(
             environment,
-            text=f"Faster-Whisper-XXL {ENGINE_VERSION} / large-v3-turbo + large-v3",
+            text=f"Faster-Whisper-XXL {ENGINE_VERSION} / large-v3-turbo + large-v3 (한국어 인식 전용)",
         ).grid(row=0, column=0, sticky="w")
         ttk.Label(environment, text=str(self.paths.root)).grid(row=1, column=0, sticky="w", pady=(4, 0))
         ttk.Button(environment, text="앱 데이터 폴더 열기", command=self._open_data_folder).grid(
@@ -230,12 +381,35 @@ class SubtitleBatcherApp:
         self.repair_button.configure(state=tk.DISABLED)
         self.stop_button.configure(state=tk.DISABLED)
 
+    def _begin_setup(self) -> None:
+        if self.runtime.ready():
+            self.controller.start_setup()
+            return
+        if not self.settings.skip_setup_prompt:
+            accepted, remember_decline = SetupPrompt(self.root, self.paths.root).show()
+            if accepted:
+                self.controller.start_setup()
+                return
+            if remember_decline:
+                self.settings.skip_setup_prompt = True
+                with suppress(OSError):
+                    save_settings(self.paths, self.settings)
+        self._set_status(SETUP_PENDING_MESSAGE)
+        self.repair_button.configure(state=tk.NORMAL)
+
+    def _set_status(self, text: str) -> None:
+        self.status_var.set(single_line_preview(text, STATUS_PREVIEW_CHARS))
+
     def _scan(self) -> None:
         root_path = valid_root_directory(self.root_var.get())
         if root_path is None:
-            self.status_var.set("미디어 폴더를 찾을 수 없습니다.")
+            if self.root_var.get().strip():
+                self._set_status("미디어 폴더를 찾을 수 없습니다.")
+            else:
+                self._set_status("'폴더 선택'으로 영상·녹음 파일이 있는 폴더를 고르세요.")
             return
         self.settings.root_directory = str(root_path)
+        self._hide_tooltip()
         self.entries.clear()
         self.selected.clear()
         self.tree.delete(*self.tree.get_children())
@@ -243,8 +417,9 @@ class SubtitleBatcherApp:
             iid = self._iid(entry.path)
             self.entries[iid] = entry
             self.tree.insert("", tk.END, iid=iid, values=self._row_values(iid, entry))
-        self.status_var.set(f"미디어 {len(self.entries)}개 검색 완료")
+        self._set_status(f"미디어 {len(self.entries)}개 검색 완료")
         self._update_count()
+        self._fit_message_column()
 
     def _browse(self) -> None:
         selected = filedialog.askdirectory(initialdir=self.root_var.get() or None)
@@ -261,6 +436,7 @@ class SubtitleBatcherApp:
         self._refresh_checks()
 
     def _tree_click(self, event: tk.Event[tk.Misc]) -> None:
+        self._hide_tooltip()
         if self.tree.identify_region(event.x, event.y) != "cell":
             return
         iid = self.tree.identify_row(event.y)
@@ -268,11 +444,130 @@ class SubtitleBatcherApp:
         if iid and column == "#1":
             self._toggle(iid)
 
+    def _tree_double_click(self, event: tk.Event[tk.Misc]) -> str | None:
+        if self.tree.identify_region(event.x, event.y) != "cell":
+            return None
+        iid = self.tree.identify_row(event.y)
+        if not iid:
+            return None
+        if self.tree.identify_column(event.x) == "#1":
+            self._toggle(iid)
+        else:
+            self._show_details(iid)
+        return "break"
+
     def _tree_space(self, _event: tk.Event[tk.Misc]) -> str:
         selection = self.tree.selection()
         if selection:
             self._toggle(selection[0])
         return "break"
+
+    def _tree_motion(self, event: tk.Event[tk.Misc]) -> None:
+        iid = ""
+        if self.tree.identify_region(event.x, event.y) == "cell":
+            iid = self.tree.identify_row(event.y)
+        if iid == self._tooltip_iid:
+            return
+        self._hide_tooltip()
+        self._tooltip_iid = iid
+        entry = self.entries.get(iid)
+        if entry is not None and entry.message.strip():
+            x, y = event.x_root, event.y_root
+            self._tooltip_after = self.root.after(
+                TOOLTIP_DELAY_MS, lambda: self._show_tooltip(iid, x, y)
+            )
+
+    def _show_tooltip(self, iid: str, x: int, y: int) -> None:
+        self._tooltip_after = None
+        entry = self.entries.get(iid)
+        if entry is None or not entry.message.strip():
+            return
+        text = entry.message.strip()
+        if len(text) > TOOLTIP_MAX_CHARS:
+            text = text[:TOOLTIP_MAX_CHARS].rstrip() + "\n… (더블클릭하면 전체를 볼 수 있습니다)"
+        tip = tk.Toplevel(self.root)
+        tip.wm_overrideredirect(True)
+        tk.Label(
+            tip,
+            text=text,
+            justify=tk.LEFT,
+            wraplength="16c",
+            background="#ffffe1",
+            relief=tk.SOLID,
+            borderwidth=1,
+            padx=6,
+            pady=4,
+        ).pack()
+        tip.update_idletasks()
+        left = self.root.winfo_rootx()
+        right = left + self.root.winfo_width()
+        bottom = self.root.winfo_rooty() + self.root.winfo_height()
+        tip_x = max(min(x + 16, right - tip.winfo_width()), left)
+        tip_y = y + 20
+        if tip_y + tip.winfo_height() > bottom:
+            tip_y = y - tip.winfo_height() - 12
+        tip.wm_geometry(f"+{tip_x}+{tip_y}")
+        self._tooltip = tip
+
+    def _hide_tooltip(self) -> None:
+        if self._tooltip_after is not None:
+            self.root.after_cancel(self._tooltip_after)
+            self._tooltip_after = None
+        if self._tooltip is not None:
+            self._tooltip.destroy()
+            self._tooltip = None
+        self._tooltip_iid = ""
+
+    def _show_details(self, iid: str) -> None:
+        entry = self.entries.get(iid)
+        if entry is None:
+            return
+        self._hide_tooltip()
+        detail = entry_detail_text(entry)
+        window = tk.Toplevel(self.root)
+        window.title(f"{entry.path.name} — 상세")
+        window.geometry("760x380")
+        window.minsize(420, 240)
+        window.transient(self.root)
+        frame = ttk.Frame(window, padding=10)
+        frame.pack(fill=tk.BOTH, expand=True)
+        buttons = ttk.Frame(frame)
+        buttons.pack(side=tk.BOTTOM, fill=tk.X, pady=(8, 0))
+        ttk.Button(buttons, text="닫기", command=window.destroy).pack(side=tk.RIGHT)
+        ttk.Button(buttons, text="복사", command=lambda: self._copy_text(detail)).pack(
+            side=tk.RIGHT, padx=(0, 6)
+        )
+        text = tk.Text(frame, wrap=tk.WORD, height=12, font="TkDefaultFont")
+        scroll = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=text.yview)
+        text.configure(yscrollcommand=scroll.set)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        text.insert("1.0", detail)
+        text.configure(state=tk.DISABLED)
+        window.bind("<Escape>", lambda _event: window.destroy())
+        text.focus_set()
+
+    def _copy_text(self, text: str) -> None:
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+
+    def _fit_message_column(self) -> None:
+        other = sum(
+            int(self.tree.column(column, "width"))
+            for column in self.tree["columns"]
+            if column != "message"
+        )
+        content = max(
+            (
+                self._tree_font.measure(self.tree.set(iid, "message"))
+                for iid in self.tree.get_children()
+            ),
+            default=0,
+        )
+        available = self.tree.winfo_width() - other - 4
+        width = max(MESSAGE_MIN_WIDTH, content + CELL_PADDING, available)
+        if width != int(self.tree.column("message", "width")):
+            self.tree.column("message", width=width)
 
     def _toggle(self, iid: str) -> None:
         if iid in self.selected:
@@ -316,11 +611,13 @@ class SubtitleBatcherApp:
             entry.stage = "대기열"
             entry.message = ""
             self._refresh_row(iid)
+        self._fit_message_column()
         if not self.controller.start_jobs(jobs):
             messagebox.showwarning(APP_DISPLAY_NAME, "다른 작업이 이미 진행 중입니다.")
 
     def _repair(self) -> None:
-        if not self.controller.start_setup(force_repair=True):
+        # 미설치 상태에서는 빠진 구성만 받고, 설치가 끝난 상태에서만 전체를 다시 설치합니다.
+        if not self.controller.start_setup(force_repair=self.runtime.ready()):
             messagebox.showwarning(APP_DISPLAY_NAME, "다른 작업이 이미 진행 중입니다.")
 
     def _open_data_folder(self) -> None:
@@ -345,26 +642,27 @@ class SubtitleBatcherApp:
             self.stop_button.configure(state=tk.NORMAL)
         elif event.kind == "setup_ready":
             self.ready = True
-            self.status_var.set(event.message)
+            self.settings.skip_setup_prompt = False
+            self._set_status(event.message)
         elif event.kind == "setup_failed":
             self.ready = False
-            self.status_var.set(f"환경 준비 실패: {event.message}")
+            self._set_status(f"환경 준비 실패: {event.message}")
             messagebox.showerror(APP_DISPLAY_NAME, f"인식 환경 준비 실패\n\n{event.message}")
         elif event.kind == "setup_cancelled":
-            self.status_var.set(event.message)
+            self._set_status(event.message)
         elif event.kind in {"setup_progress", "job_progress"}:
-            self.status_var.set(f"{event.stage}: {event.message}")
+            self._set_status(f"{event.stage}: {event.message}")
             self._set_progress(event.fraction)
         elif event.kind == "job_started" and event.video:
             self._update_video_event(event.video, event)
         elif event.kind == "job_finished" and event.video:
             self._update_video_event(event.video, event)
             if event.status is JobStatus.FAILED:
-                self.status_var.set(f"실패: {event.video.name} — {event.message}")
+                self._set_status(f"실패: {event.video.name} — {event.message}")
         elif event.kind == "cancelling":
-            self.status_var.set(event.message)
+            self._set_status(event.message)
         elif event.kind == "batch_finished":
-            self.status_var.set(event.message)
+            self._set_status(event.message)
             self._set_progress(1.0)
         elif event.kind == "idle":
             self.ready = self.runtime.ready()
@@ -394,6 +692,7 @@ class SubtitleBatcherApp:
             }:
                 entry.stage = "완료"
         self._refresh_row(iid)
+        self._fit_message_column()
 
     def _set_progress(self, fraction: float | None) -> None:
         if fraction is None:
@@ -440,7 +739,7 @@ class SubtitleBatcherApp:
             output,
             entry.stage,
             _format_elapsed(entry.elapsed_seconds),
-            entry.message,
+            single_line_preview(entry.message),
         )
 
     def _update_count(self) -> None:
@@ -463,6 +762,7 @@ class SubtitleBatcherApp:
             return
         if self.controller.busy:
             self.controller.cancel()
+        self._hide_tooltip()
         self.settings.root_directory = self.root_var.get().strip()
         self.settings.glossary_text = self.glossary_text.get("1.0", "end-1c")
         self.settings.window_geometry = self.root.geometry()

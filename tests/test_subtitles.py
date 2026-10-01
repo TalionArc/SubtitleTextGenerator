@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from lecture_subtitle_batcher.models import Segment, Transcript, Word
-from lecture_subtitle_batcher.subtitles import (
+from subtitle_text_generator.models import Segment, Transcript, Word
+from subtitle_text_generator.subtitles import (
     Cue,
     ExistingSubtitleError,
     ExistingTextOutputError,

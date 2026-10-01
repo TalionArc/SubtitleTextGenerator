@@ -63,15 +63,15 @@ function Backup-Executable {
 
 Push-Location $projectRoot
 try {
-    Backup-Executable (Join-Path $projectRoot 'dist\LectureSubtitleBatcher.exe')
-    Backup-Executable (Join-Path $projectRoot 'output\LectureSubtitleBatcher.exe')
+    Backup-Executable (Join-Path $projectRoot 'dist\SubtitleTextGenerator.exe')
+    Backup-Executable (Join-Path $projectRoot 'output\SubtitleTextGenerator.exe')
     if (-not (Test-Path -LiteralPath $venvPython)) {
         python -m venv .venv
     }
     & $venvPython -m pip install --upgrade pip
     & $venvPython -m pip install -r requirements-build.txt
     if (-not $SkipTests) {
-        & $venvPython -m ruff check lecture_subtitle_batcher tests run.py
+        & $venvPython -m ruff check subtitle_text_generator tests run.py
         & $venvPython -m pytest
     }
     & $pyinstaller `
@@ -79,13 +79,13 @@ try {
         --clean `
         --onefile `
         --windowed `
-        --name LectureSubtitleBatcher `
+        --name SubtitleTextGenerator `
         --distpath output `
         --workpath build `
         --version-file packaging\version_info.txt `
         run.py
-    Backup-Executable (Join-Path $projectRoot 'output\LectureSubtitleBatcher.exe')
-    Write-Host "완료: $projectRoot\output\LectureSubtitleBatcher.exe"
+    Backup-Executable (Join-Path $projectRoot 'output\SubtitleTextGenerator.exe')
+    Write-Host "완료: $projectRoot\output\SubtitleTextGenerator.exe"
 }
 finally {
     Pop-Location

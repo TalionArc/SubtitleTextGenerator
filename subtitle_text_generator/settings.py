@@ -15,6 +15,7 @@ class Settings:
     glossary_text: str = ""
     window_geometry: str = "1120x720"
     audio_txt_timestamps: bool = True
+    skip_setup_prompt: bool = False
 
 
 def load_settings(paths: AppPaths) -> Settings:
@@ -28,6 +29,7 @@ def load_settings(paths: AppPaths) -> Settings:
             glossary_text=str(data.get("glossary_text") or ""),
             window_geometry=str(data.get("window_geometry") or "1120x720"),
             audio_txt_timestamps=audio_txt_timestamps,
+            skip_setup_prompt=data.get("skip_setup_prompt") is True,
         )
     except (OSError, ValueError, TypeError):
         return Settings()
@@ -60,6 +62,8 @@ def normalize_glossary(text: str) -> tuple[str, ...]:
 
 
 def valid_root_directory(value: str) -> Path | None:
+    if not value.strip():
+        return None
     try:
         path = Path(value).expanduser().resolve()
     except (OSError, RuntimeError):

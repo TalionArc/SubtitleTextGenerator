@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from lecture_subtitle_batcher.main import main
+from subtitle_text_generator.main import main
 
 if __name__ == "__main__":
     main()

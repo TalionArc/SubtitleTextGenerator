@@ -3,8 +3,8 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from lecture_subtitle_batcher.controller import BatchController
-from lecture_subtitle_batcher.models import JobMode, JobRequest, JobResult, JobStatus
+from subtitle_text_generator.controller import BatchController
+from subtitle_text_generator.models import JobMode, JobRequest, JobResult, JobStatus
 
 
 class ReadyRuntime:

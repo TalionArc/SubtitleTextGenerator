@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from lecture_subtitle_batcher.app_paths import AppPaths
-from lecture_subtitle_batcher.engine import EngineExecutionError
-from lecture_subtitle_batcher.models import JobMode, JobRequest, JobStatus
-from lecture_subtitle_batcher.processor import JobProcessor, SourceChangedError, job_identity
+from subtitle_text_generator.app_paths import AppPaths
+from subtitle_text_generator.engine import EngineExecutionError
+from subtitle_text_generator.models import JobMode, JobRequest, JobStatus
+from subtitle_text_generator.processor import JobProcessor, SourceChangedError, job_identity
 
 
 class FakeRuntime:

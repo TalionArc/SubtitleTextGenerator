@@ -13,6 +13,8 @@ from pathlib import Path
 
 from .app_paths import AppPaths
 from .constants import (
+    APP_NAME,
+    APP_VERSION,
     ENGINE_ARCHIVE_NAME,
     ENGINE_ARCHIVE_SHA256,
     ENGINE_ARCHIVE_SIZE,
@@ -138,7 +140,7 @@ class ResumableDownloader:
 
     def _download_once(self, url: str, partial: Path, expected_size: int, label: str) -> None:
         current = partial.stat().st_size if partial.exists() else 0
-        headers = {"User-Agent": "LectureSubtitleBatcher/1.0"}
+        headers = {"User-Agent": f"{APP_NAME}/{APP_VERSION}"}
         if current:
             headers["Range"] = f"bytes={current}-"
         request = urllib.request.Request(url, headers=headers)

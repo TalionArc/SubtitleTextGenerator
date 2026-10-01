@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from lecture_subtitle_batcher.runtime import (
+from subtitle_text_generator.runtime import (
     ResumableDownloader,
     RuntimeSetupError,
     gpu_summary,
@@ -60,7 +60,7 @@ def test_resumable_downloader_continues_part_file(tmp_path: Path) -> None:
 
 def test_gpu_summary_does_not_allow_silent_cpu_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "lecture_subtitle_batcher.runtime.subprocess.run",
+        "subtitle_text_generator.runtime.subprocess.run",
         lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout="", stderr="driver error"),
     )
     with pytest.raises(RuntimeSetupError, match="CUDA"):

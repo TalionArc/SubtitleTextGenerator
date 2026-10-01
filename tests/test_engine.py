@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from lecture_subtitle_batcher.engine import (
+from subtitle_text_generator.engine import (
     EngineRun,
     EngineRunner,
     _has_complete_output_after_nonzero_exit,

@@ -16,7 +16,9 @@ dist/
 output/
 backup/
 *.spec
+SubtitleTextGenerator-data/
 LectureSubtitleBatcher-data/
+HANDOFF.md
 *.part
 *.log
 .idea/

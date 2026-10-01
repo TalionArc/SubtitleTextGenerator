@@ -4,9 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from lecture_subtitle_batcher.constants import AUDIO_EXTENSIONS
-from lecture_subtitle_batcher.models import MediaKind
-from lecture_subtitle_batcher.scanner import (
+from subtitle_text_generator.constants import AUDIO_EXTENSIONS
+from subtitle_text_generator.models import MediaKind
+from subtitle_text_generator.scanner import (
     matching_outputs,
     matching_subtitles,
     scan_media,
