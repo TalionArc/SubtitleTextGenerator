@@ -18,6 +18,7 @@ class Settings:
     audio_txt_timestamps: bool = True
     skip_setup_prompt: bool = False
     watch_folder: bool = False
+    watch_log: bool = True
     sort_column: str = ""
     sort_descending: bool = False
 
@@ -28,6 +29,9 @@ def load_settings(paths: AppPaths) -> Settings:
         audio_txt_timestamps = data.get("audio_txt_timestamps", True)
         if not isinstance(audio_txt_timestamps, bool):
             audio_txt_timestamps = True
+        watch_log = data.get("watch_log", True)
+        if not isinstance(watch_log, bool):
+            watch_log = True
         sort_column = data.get("sort_column")
         if sort_column not in SORT_COLUMNS:
             sort_column = ""
@@ -38,6 +42,7 @@ def load_settings(paths: AppPaths) -> Settings:
             audio_txt_timestamps=audio_txt_timestamps,
             skip_setup_prompt=data.get("skip_setup_prompt") is True,
             watch_folder=data.get("watch_folder") is True,
+            watch_log=watch_log,
             sort_column=sort_column,
             sort_descending=data.get("sort_descending") is True,
         )

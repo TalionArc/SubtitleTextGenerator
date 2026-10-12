@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import queue
 import shutil
@@ -30,6 +31,8 @@ from .settings import Settings, normalize_glossary, save_settings, valid_root_di
 from .sorting import SORT_COLUMNS, sorted_ids
 from .watcher import FolderWatcher, WatchReport
 
+LOGGER = logging.getLogger(__name__)
+
 MESSAGE_PREVIEW_CHARS = 120
 STATUS_PREVIEW_CHARS = 200
 TOOLTIP_MAX_CHARS = 1_500
@@ -38,7 +41,7 @@ CELL_PADDING = 24
 TOOLTIP_DELAY_MS = 600
 SETUP_PROMPT_DELAY_MS = 150
 SETUP_PENDING_MESSAGE = (
-    "인식 환경이 설치되지 않았습니다. '용어집 / 설정' 탭의 '환경 검사 / 복구'로 설치할 수 있습니다."
+    "인식 환경이 설치되지 않았습니다. 오른쪽 위 '설정'의 '환경 검사 / 복구'로 설치할 수 있습니다."
 )
 COLUMN_HEADINGS = {
     "selected": "선택",
@@ -80,7 +83,7 @@ def setup_prompt_text(install_root: Path, free_bytes: int | None) -> str:
         (
             "",
             "NVIDIA GPU(CUDA)가 있어야 인식할 수 있습니다.",
-            "'아니오'를 고르면 설치하지 않으며, '용어집 / 설정' 탭의 '환경 검사 / 복구'로 "
+            "'아니오'를 고르면 설치하지 않으며, 오른쪽 위 '설정'의 '환경 검사 / 복구'로 "
             "나중에 설치할 수 있습니다.",
         )
     )
@@ -228,6 +231,9 @@ class SubtitleBatcherApp:
         self._watch_batch = 0
         self._watch_latest = ""
         self._batch_iids: set[str] = set()
+        self._settings_window: tk.Toplevel | None = None
+        self._repair_button: ttk.Button | None = None
+        self._repair_state = tk.DISABLED
         self._tooltip: tk.Toplevel | None = None
         self._tooltip_after: str | None = None
         self._tooltip_iid = ""
@@ -255,6 +261,7 @@ class SubtitleBatcherApp:
             style.theme_use("vista")
         style.configure("Treeview", rowheight=25)
         style.configure("Primary.TButton", padding=(12, 6))
+        style.configure("Corner.TButton", padding=(10, 0))
         style.configure("Danger.TButton", padding=(10, 6))
         try:
             self._tree_font = tkfont.nametofont(style.lookup("Treeview", "font") or "TkDefaultFont")
@@ -268,9 +275,14 @@ class SubtitleBatcherApp:
         notebook = ttk.Notebook(container)
         notebook.pack(fill=tk.BOTH, expand=True)
         work_tab = ttk.Frame(notebook, padding=8)
-        settings_tab = ttk.Frame(notebook, padding=12)
+        glossary_tab = ttk.Frame(notebook, padding=12)
         notebook.add(work_tab, text="미디어 작업")
-        notebook.add(settings_tab, text="용어집 / 설정")
+        notebook.add(glossary_tab, text="용어집")
+        # 탭 줄의 오른쪽 빈자리에 올려 두어 어느 탭에서나 보이게 합니다.
+        ttk.Button(
+            container, text="설정", style="Corner.TButton", command=self._open_settings
+        ).place(in_=notebook, relx=1.0, y=0, anchor=tk.NE)
+        self.watch_log_var = tk.BooleanVar(value=self.settings.watch_log)
 
         folder_row = ttk.Frame(work_tab)
         folder_row.pack(fill=tk.X, pady=(0, 8))
@@ -403,15 +415,15 @@ class SubtitleBatcherApp:
             self.tree.bind(sequence, lambda _event: self._hide_tooltip(), add="+")
 
         ttk.Label(
-            settings_tab,
+            glossary_tab,
             text="전역 용어집",
             font=("Malgun Gothic", 11, "bold"),
         ).pack(anchor=tk.W)
         ttk.Label(
-            settings_tab,
+            glossary_tab,
             text="한 줄에 한 용어를 입력하세요. 중복을 제거해 최대 50개·500자까지 모든 작업에 적용합니다.",
         ).pack(anchor=tk.W, pady=(3, 7))
-        glossary_frame = ttk.Frame(settings_tab)
+        glossary_frame = ttk.Frame(glossary_tab)
         glossary_frame.pack(fill=tk.BOTH, expand=True)
         self.glossary_text = tk.Text(glossary_frame, height=14, wrap=tk.WORD, undo=True)
         self.glossary_text.insert("1.0", self.settings.glossary_text)
@@ -423,26 +435,104 @@ class SubtitleBatcherApp:
         glossary_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.glossary_text.bind("<KeyRelease>", lambda _event: self._update_glossary_count())
         self.glossary_count_var = tk.StringVar()
-        ttk.Label(settings_tab, textvariable=self.glossary_count_var).pack(anchor=tk.E, pady=(4, 12))
+        ttk.Label(glossary_tab, textvariable=self.glossary_count_var).pack(anchor=tk.E, pady=(4, 0))
         self._update_glossary_count()
 
-        environment = ttk.LabelFrame(settings_tab, text="로컬 인식 환경", padding=10)
-        environment.pack(fill=tk.X)
+        self._set_action_state(False)
+        self.stop_button.configure(state=tk.DISABLED)
+
+    def _open_settings(self) -> None:
+        window = self._settings_window
+        if window is not None and window.winfo_exists():
+            window.deiconify()
+            window.lift()
+            window.focus_set()
+            return
+        window = tk.Toplevel(self.root)
+        self._settings_window = window
+        window.title(f"{APP_DISPLAY_NAME} — 설정")
+        window.resizable(False, False)
+        window.transient(self.root)
+        body = ttk.Frame(window, padding=14)
+        body.pack(fill=tk.BOTH, expand=True)
+
+        watch = ttk.LabelFrame(body, text="폴더 감시", padding=10)
+        watch.pack(fill=tk.X)
+        ttk.Checkbutton(
+            watch,
+            text="폴더 감시 기록을 로그 파일에 남기기",
+            variable=self.watch_log_var,
+            command=self._apply_settings,
+        ).pack(anchor=tk.W)
+        ttk.Label(
+            watch,
+            text="감시 시작·중지, 찾은 파일, 자동 처리 결과를 시각과 함께 적습니다. "
+            "오류 기록과 작업별 인식 로그는 이 설정과 상관없이 남습니다.\n"
+            f"기록 위치: {self.paths.logs / 'application.log'}",
+            justify=tk.LEFT,
+            wraplength="15c",
+        ).pack(anchor=tk.W, pady=(4, 8))
+        ttk.Button(watch, text="로그 폴더 열기", command=self._open_log_folder).pack(anchor=tk.W)
+
+        environment = ttk.LabelFrame(body, text="로컬 인식 환경", padding=10)
+        environment.pack(fill=tk.X, pady=(12, 0))
         ttk.Label(
             environment,
             text=f"Faster-Whisper-XXL {ENGINE_VERSION} / large-v3-turbo + large-v3 (한국어 인식 전용)",
-        ).grid(row=0, column=0, sticky="w")
-        ttk.Label(environment, text=str(self.paths.root)).grid(row=1, column=0, sticky="w", pady=(4, 0))
-        ttk.Button(environment, text="앱 데이터 폴더 열기", command=self._open_data_folder).grid(
-            row=0, column=1, rowspan=2, padx=(15, 5)
+        ).pack(anchor=tk.W)
+        ttk.Label(
+            environment, text=f"데이터 폴더: {self.paths.root}", justify=tk.LEFT, wraplength="15c"
+        ).pack(anchor=tk.W, pady=(4, 8))
+        environment_buttons = ttk.Frame(environment)
+        environment_buttons.pack(anchor=tk.W)
+        ttk.Button(
+            environment_buttons, text="앱 데이터 폴더 열기", command=self._open_data_folder
+        ).pack(side=tk.LEFT)
+        self._repair_button = ttk.Button(
+            environment_buttons,
+            text="환경 검사 / 복구",
+            command=self._repair,
+            state=self._repair_state,
         )
-        self.repair_button = ttk.Button(environment, text="환경 검사 / 복구", command=self._repair)
-        self.repair_button.grid(row=0, column=2, rowspan=2)
-        environment.columnconfigure(0, weight=1)
+        self._repair_button.pack(side=tk.LEFT, padx=(6, 0))
 
-        self._set_action_state(False)
-        self.repair_button.configure(state=tk.DISABLED)
-        self.stop_button.configure(state=tk.DISABLED)
+        ttk.Button(body, text="닫기", command=window.destroy).pack(anchor=tk.E, pady=(12, 0))
+        window.bind("<Escape>", lambda _event: window.destroy())
+        window.update_idletasks()
+        x = self.root.winfo_rootx() + max((self.root.winfo_width() - window.winfo_width()) // 2, 0)
+        y = self.root.winfo_rooty() + max((self.root.winfo_height() - window.winfo_height()) // 3, 0)
+        window.geometry(f"+{x}+{y}")
+        window.focus_set()
+
+    def _dialog_parent(self) -> tk.Misc:
+        window = self._settings_window
+        return window if window is not None and window.winfo_exists() else self.root
+
+    def _set_repair_state(self, state: str) -> None:
+        self._repair_state = state
+        button = self._repair_button
+        if button is not None and button.winfo_exists():
+            button.configure(state=state)
+
+    def _apply_settings(self) -> None:
+        # 설정 창에서 바꾼 값은 바로 저장해, 창을 닫거나 프로그램이 비정상 종료해도 남게 합니다.
+        self._collect_settings()
+        with suppress(OSError):
+            save_settings(self.paths, self.settings)
+
+    def _collect_settings(self) -> None:
+        self.settings.watch_folder = bool(self.watch_var.get())
+        self.settings.watch_log = bool(self.watch_log_var.get())
+        self.settings.sort_column = self._sort_column
+        self.settings.sort_descending = self._sort_descending
+        self.settings.root_directory = self.root_var.get().strip()
+        self.settings.glossary_text = self.glossary_text.get("1.0", "end-1c")
+        self.settings.window_geometry = self.root.geometry()
+        self.settings.audio_txt_timestamps = bool(self.audio_timestamp_var.get())
+
+    def _watch_log(self, level: int, message: str, *args: object) -> None:
+        if self.settings.watch_log:
+            LOGGER.log(level, message, *args)
 
     def _begin_setup(self) -> None:
         if self.runtime.ready():
@@ -458,7 +548,7 @@ class SubtitleBatcherApp:
                 with suppress(OSError):
                     save_settings(self.paths, self.settings)
         self._set_status(SETUP_PENDING_MESSAGE)
-        self.repair_button.configure(state=tk.NORMAL)
+        self._set_repair_state(tk.NORMAL)
 
     def _set_status(self, text: str) -> None:
         self.status_var.set(single_line_preview(text, STATUS_PREVIEW_CHARS))
@@ -526,6 +616,7 @@ class SubtitleBatcherApp:
         current = self._watcher
         if current is not None and current.root != root_path:
             current.stop()
+            self._watch_log(logging.INFO, "Folder watch stopped: %s", current.root)
             self._watcher = current = None
             self._watch_report = None
         if root_path is None:
@@ -538,6 +629,7 @@ class SubtitleBatcherApp:
                 ),
             )
             self._watcher.start()
+            self._watch_log(logging.INFO, "Folder watch started: %s", root_path)
         self._refresh_watch_state()
 
     def _refresh_watch_state(self) -> None:
@@ -557,6 +649,11 @@ class SubtitleBatcherApp:
         # 폴더를 바꾸거나 감시를 끈 뒤에 도착한 이전 감시의 보고는 버립니다.
         if source is not self._watcher:
             return
+        was_available = self._watch_report is None or self._watch_report.available
+        if was_available and not report.available:
+            self._watch_log(logging.WARNING, "Folder watch cannot read %s", source.root)
+        elif report.available and not was_available:
+            self._watch_log(logging.INFO, "Folder watch can read %s again", source.root)
         self._watch_report = report
         found = 0
         for path in report.ready:
@@ -580,9 +677,15 @@ class SubtitleBatcherApp:
             found += 1
             if entry.has_output:
                 entry.message = "새로 추가됐지만 결과 파일이 이미 있어 자동으로 처리하지 않았습니다."
+                self._watch_log(
+                    logging.INFO,
+                    "Folder watch found %s; a result file exists, not queued",
+                    entry.path,
+                )
             else:
                 self._mark_watch_queued(entry)
                 self._watch_queue.append(iid)
+                self._watch_log(logging.INFO, "Folder watch found %s; queued", entry.path)
             self._refresh_row(iid)
         if found:
             self._apply_order()
@@ -605,6 +708,11 @@ class SubtitleBatcherApp:
                 entry.message = message
                 self._refresh_row(iid)
         if self._watch_queue:
+            self._watch_log(
+                logging.INFO,
+                "Folder watch queue cleared: %d file(s) not processed",
+                len(self._watch_queue),
+            )
             self._watch_queue.clear()
             self._fit_message_column()
 
@@ -841,14 +949,22 @@ class SubtitleBatcherApp:
     def _repair(self) -> None:
         # 미설치 상태에서는 빠진 구성만 받고, 설치가 끝난 상태에서만 전체를 다시 설치합니다.
         if not self.controller.start_setup(force_repair=self.runtime.ready()):
-            messagebox.showwarning(APP_DISPLAY_NAME, "다른 작업이 이미 진행 중입니다.")
+            messagebox.showwarning(
+                APP_DISPLAY_NAME, "다른 작업이 이미 진행 중입니다.", parent=self._dialog_parent()
+            )
 
     def _open_data_folder(self) -> None:
+        self._open_folder(self.paths.root)
+
+    def _open_log_folder(self) -> None:
+        self._open_folder(self.paths.logs)
+
+    def _open_folder(self, folder: Path) -> None:
         self.paths.ensure_base_dirs()
         try:
-            os.startfile(self.paths.root)  # type: ignore[attr-defined]
+            os.startfile(folder)  # type: ignore[attr-defined]
         except OSError as exc:
-            messagebox.showerror(APP_DISPLAY_NAME, str(exc))
+            messagebox.showerror(APP_DISPLAY_NAME, str(exc), parent=self._dialog_parent())
 
     def _drain_events(self) -> None:
         try:
@@ -865,7 +981,7 @@ class SubtitleBatcherApp:
             self._handle_watch(*event.payload)
         elif event.kind in {"setup_started", "batch_started"}:
             self._set_action_state(False)
-            self.repair_button.configure(state=tk.DISABLED)
+            self._set_repair_state(tk.DISABLED)
             self.stop_button.configure(state=tk.NORMAL)
         elif event.kind == "setup_ready":
             self.ready = True
@@ -889,6 +1005,13 @@ class SubtitleBatcherApp:
                 self._watch_latest = watch_result_text(
                     event.video.name, event.status, time.strftime("%H:%M")
                 )
+                self._watch_log(
+                    logging.INFO,
+                    "Folder watch result for %s: %s - %s",
+                    event.video,
+                    event.status.value,
+                    single_line_preview(event.message, STATUS_PREVIEW_CHARS),
+                )
                 self._refresh_watch_state()
             if event.status is JobStatus.FAILED:
                 self._set_status(f"실패: {event.video.name} — {event.message}")
@@ -907,7 +1030,7 @@ class SubtitleBatcherApp:
             self._batch_iids.clear()
             self._watch_batch = 0
             self._set_action_state(self.ready)
-            self.repair_button.configure(state=tk.NORMAL)
+            self._set_repair_state(tk.NORMAL)
             self.stop_button.configure(state=tk.DISABLED)
             self._refresh_watch_state()
 
@@ -1006,14 +1129,11 @@ class SubtitleBatcherApp:
             self.controller.cancel()
         if self._watcher is not None:
             self._watcher.stop()
+            self._watch_log(
+                logging.INFO, "Folder watch stopped: %s (program closed)", self._watcher.root
+            )
         self._hide_tooltip()
-        self.settings.watch_folder = bool(self.watch_var.get())
-        self.settings.sort_column = self._sort_column
-        self.settings.sort_descending = self._sort_descending
-        self.settings.root_directory = self.root_var.get().strip()
-        self.settings.glossary_text = self.glossary_text.get("1.0", "end-1c")
-        self.settings.window_geometry = self.root.geometry()
-        self.settings.audio_txt_timestamps = bool(self.audio_timestamp_var.get())
+        self._collect_settings()
         with suppress(OSError):
             save_settings(self.paths, self.settings)
         self.root.destroy()

@@ -29,6 +29,7 @@ def test_settings_round_trip(tmp_path: Path) -> None:
         audio_txt_timestamps=False,
         skip_setup_prompt=True,
         watch_folder=True,
+        watch_log=False,
         sort_column="name",
         sort_descending=True,
     )
@@ -45,6 +46,7 @@ def test_old_settings_default_audio_timestamps_on(tmp_path: Path) -> None:
     assert loaded.skip_setup_prompt is False
     assert loaded.root_directory == "C:/media"
     assert loaded.watch_folder is False
+    assert loaded.watch_log is True
     assert (loaded.sort_column, loaded.sort_descending) == ("", False)
 
 
@@ -57,8 +59,12 @@ def test_invalid_watch_and_sort_values_are_ignored(tmp_path: Path) -> None:
     loaded = load_settings(paths)
     assert loaded.watch_folder is False
     assert (loaded.sort_column, loaded.sort_descending) == ("", False)
-    paths.settings_file.write_text('{"sort_column": ["name"]}', encoding="utf-8")
-    assert load_settings(paths).sort_column == ""
+    paths.settings_file.write_text('{"sort_column": ["name"], "watch_log": 0}', encoding="utf-8")
+    loaded = load_settings(paths)
+    assert loaded.sort_column == ""
+    assert loaded.watch_log is True
+    paths.settings_file.write_text('{"watch_log": false}', encoding="utf-8")
+    assert load_settings(paths).watch_log is False
 
 
 def test_non_boolean_skip_setup_prompt_is_ignored(tmp_path: Path) -> None:
