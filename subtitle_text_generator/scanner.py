@@ -40,32 +40,37 @@ def matching_subtitles(video: Path) -> tuple[Path, ...]:
     return matching_outputs(video)
 
 
+def media_entry(path: Path, root: Path) -> MediaEntry | None:
+    """Build the list entry for one media file; None when it is gone or not a media file."""
+    try:
+        if not path.is_file() or path.suffix.casefold() not in MEDIA_EXTENSIONS:
+            return None
+        stat = path.stat()
+        resolved = path.resolve()
+    except OSError:
+        return None
+    return MediaEntry(
+        path=resolved,
+        root=root,
+        size=stat.st_size,
+        mtime_ns=stat.st_mtime_ns,
+        kind=media_kind(path),
+        existing_outputs=matching_outputs(path),
+    )
+
+
 def scan_media(root: Path) -> list[MediaEntry]:
     root = root.resolve()
-    entries: list[MediaEntry] = []
+    entries: dict[Path, MediaEntry] = {}
     try:
-        candidates = root.rglob("*")
-        for path in candidates:
-            try:
-                if not path.is_file() or path.suffix.casefold() not in MEDIA_EXTENSIONS:
-                    continue
-                stat = path.stat()
-            except OSError:
-                continue
-            entries.append(
-                MediaEntry(
-                    path=path.resolve(),
-                    root=root,
-                    size=stat.st_size,
-                    mtime_ns=stat.st_mtime_ns,
-                    kind=media_kind(path),
-                    existing_outputs=matching_outputs(path),
-                )
-            )
+        for path in root.rglob("*"):
+            entry = media_entry(path, root)
+            # 정션으로 같은 파일에 여러 경로로 닿아도 한 번만 넣습니다.
+            if entry is not None:
+                entries.setdefault(entry.path, entry)
     except OSError:
         return []
-    entries.sort(key=lambda item: str(item.path).casefold())
-    return entries
+    return sorted(entries.values(), key=lambda item: str(item.path).casefold())
 
 
 def scan_videos(root: Path) -> list[MediaEntry]:

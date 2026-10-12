@@ -4,13 +4,18 @@ from pathlib import Path
 
 from subtitle_text_generator.constants import ENGINE_ARCHIVE_SIZE, MODELS, SETUP_DOWNLOAD_BYTES
 from subtitle_text_generator.gui import (
+    COLUMN_HEADINGS,
     MESSAGE_PREVIEW_CHARS,
     entry_detail_text,
     format_gigabytes,
+    heading_text,
     setup_prompt_text,
     single_line_preview,
+    watch_state_text,
 )
 from subtitle_text_generator.models import JobStatus, MediaEntry, MediaKind
+from subtitle_text_generator.sorting import SORT_COLUMNS
+from subtitle_text_generator.watcher import WatchReport
 
 
 def test_preview_flattens_multiline_engine_errors() -> None:
@@ -42,6 +47,40 @@ def test_setup_prompt_states_download_install_and_free_space(tmp_path: Path) -> 
     assert str(tmp_path) in text
     assert "현재 여유 공간: 47GB" in text
     assert "현재 여유 공간" not in setup_prompt_text(tmp_path, None)
+
+
+def test_heading_shows_the_sort_direction_on_one_column_only() -> None:
+    assert heading_text("name", "", False) == "파일명"
+    assert heading_text("name", "name", False) == "파일명 ▲"
+    assert heading_text("name", "name", True) == "파일명 ▼"
+    assert heading_text("status", "name", True) == "상태"
+    assert set(COLUMN_HEADINGS) == set(SORT_COLUMNS)
+
+
+def test_watch_state_text_explains_what_the_watcher_is_doing() -> None:
+    def text(**changes: object) -> str:
+        options: dict[str, object] = {
+            "enabled": True,
+            "has_folder": True,
+            "report": WatchReport(),
+            "queued": 0,
+            "engine_ready": True,
+        }
+        options.update(changes)
+        return watch_state_text(**options)  # type: ignore[arg-type]
+
+    assert text(enabled=False) == ""
+    assert "폴더를 먼저" in text(has_folder=False)
+    assert text(report=None) == "감시 준비 중"
+    assert "접근할 수 없습니다" in text(report=WatchReport(available=False))
+    assert text() == "감시 중 · 지금부터 추가되는 파일만 자동으로 처리합니다."
+    assert text(report=WatchReport(settling=2)) == (
+        "감시 중 · 새 파일 2개의 복사가 끝나기를 기다리는 중"
+    )
+    assert text(queued=3) == "감시 중 · 자동 처리 대기 3개"
+    assert text(queued=3, engine_ready=False) == (
+        "감시 중 · 자동 처리 대기 3개 (인식 환경이 준비되면 시작)"
+    )
 
 
 def test_detail_text_keeps_the_full_message(tmp_path: Path) -> None:

@@ -24,8 +24,10 @@ from .engine import EngineRunner
 from .models import JobMode, JobRequest, JobStatus, MediaEntry, MediaKind
 from .processor import JobProcessor
 from .runtime import RuntimeManager
-from .scanner import matching_outputs, scan_media
+from .scanner import matching_outputs, media_entry, scan_media
 from .settings import Settings, normalize_glossary, save_settings, valid_root_directory
+from .sorting import SORT_COLUMNS, sorted_ids
+from .watcher import FolderWatcher, WatchReport
 
 MESSAGE_PREVIEW_CHARS = 120
 STATUS_PREVIEW_CHARS = 200
@@ -37,6 +39,19 @@ SETUP_PROMPT_DELAY_MS = 150
 SETUP_PENDING_MESSAGE = (
     "인식 환경이 설치되지 않았습니다. '용어집 / 설정' 탭의 '환경 검사 / 복구'로 설치할 수 있습니다."
 )
+COLUMN_HEADINGS = {
+    "selected": "선택",
+    "kind": "종류",
+    "status": "상태",
+    "folder": "상대 폴더",
+    "name": "파일명",
+    "output": "기존 결과",
+    "stage": "처리 단계",
+    "elapsed": "경과",
+    "message": "메시지",
+}
+QUEUED_STAGE = "대기열"
+WATCH_STAGE = "감시 대기"
 
 
 def single_line_preview(text: str, limit: int = MESSAGE_PREVIEW_CHARS) -> str:
@@ -68,6 +83,40 @@ def setup_prompt_text(install_root: Path, free_bytes: int | None) -> str:
         )
     )
     return "\n".join(lines)
+
+
+def heading_text(column: str, sort_column: str, descending: bool) -> str:
+    title = COLUMN_HEADINGS[column]
+    if column != sort_column:
+        return title
+    return f"{title} {'▼' if descending else '▲'}"
+
+
+def watch_state_text(
+    *,
+    enabled: bool,
+    has_folder: bool,
+    report: WatchReport | None,
+    queued: int,
+    engine_ready: bool,
+) -> str:
+    if not enabled:
+        return ""
+    if not has_folder:
+        return "감시할 폴더를 먼저 고르세요."
+    if report is None:
+        return "감시 준비 중"
+    if not report.available:
+        return "폴더에 접근할 수 없습니다. 다시 연결되면 이어서 감시합니다."
+    parts = ["감시 중"]
+    if report.settling:
+        parts.append(f"새 파일 {report.settling}개의 복사가 끝나기를 기다리는 중")
+    if queued:
+        waiting = f"자동 처리 대기 {queued}개"
+        parts.append(waiting if engine_ready else f"{waiting} (인식 환경이 준비되면 시작)")
+    if len(parts) == 1:
+        parts.append("지금부터 추가되는 파일만 자동으로 처리합니다.")
+    return " · ".join(parts)
 
 
 def entry_detail_text(entry: MediaEntry) -> str:
@@ -158,6 +207,13 @@ class SubtitleBatcherApp:
         self.entries: dict[str, MediaEntry] = {}
         self.selected: set[str] = set()
         self.ready = False
+        self._sort_column = settings.sort_column if settings.sort_column in SORT_COLUMNS else ""
+        self._sort_descending = settings.sort_descending
+        self._scanned_root: Path | None = None
+        self._watcher: FolderWatcher | None = None
+        self._watch_report: WatchReport | None = None
+        self._watch_queue: list[str] = []
+        self._batch_iids: set[str] = set()
         self._tooltip: tk.Toplevel | None = None
         self._tooltip_after: str | None = None
         self._tooltip_iid = ""
@@ -238,6 +294,18 @@ class SubtitleBatcherApp:
             text="예: [00:01:23.456 - 00:01:28.900] (영상 SRT에는 영향 없음)",
         ).pack(side=tk.LEFT, padx=(8, 0))
 
+        watch_row = ttk.Frame(work_tab)
+        watch_row.pack(fill=tk.X, pady=(0, 8))
+        self.watch_var = tk.BooleanVar(value=self.settings.watch_folder)
+        ttk.Checkbutton(
+            watch_row,
+            text="폴더 감시 (새로 추가되는 파일 자동 생성)",
+            variable=self.watch_var,
+            command=self._sync_watcher,
+        ).pack(side=tk.LEFT)
+        self.watch_state_var = tk.StringVar()
+        ttk.Label(watch_row, textvariable=self.watch_state_var).pack(side=tk.LEFT, padx=(8, 0))
+
         # 아래쪽 행을 먼저 배치해야 상태 문구가 여러 줄이 되어도 목록에 가려지지 않습니다.
         progress_row = ttk.Frame(work_tab)
         progress_row.pack(side=tk.BOTTOM, fill=tk.X, pady=(8, 0))
@@ -275,7 +343,7 @@ class SubtitleBatcherApp:
         )
         self.full_large_button.pack(side=tk.LEFT)
         self.stop_button = ttk.Button(
-            action_row, text="중지", style="Danger.TButton", command=self.controller.cancel
+            action_row, text="중지", style="Danger.TButton", command=self._stop
         )
         self.stop_button.pack(side=tk.RIGHT)
         ttk.Label(action_row, text="행을 더블클릭하면 전체 메시지를 볼 수 있습니다.").pack(
@@ -284,45 +352,26 @@ class SubtitleBatcherApp:
 
         tree_frame = ttk.Frame(work_tab)
         tree_frame.pack(fill=tk.BOTH, expand=True)
-        columns = (
-            "selected",
-            "kind",
-            "status",
-            "folder",
-            "name",
-            "output",
-            "stage",
-            "elapsed",
-            "message",
+        self.tree = ttk.Treeview(
+            tree_frame, columns=SORT_COLUMNS, show="headings", selectmode="browse"
         )
-        self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="browse")
-        headings = {
-            "selected": "선택",
-            "kind": "종류",
-            "status": "상태",
-            "folder": "상대 폴더",
-            "name": "파일명",
-            "output": "기존 결과",
-            "stage": "처리 단계",
-            "elapsed": "경과",
-            "message": "메시지",
-        }
         widths = {
-            "selected": 45,
-            "kind": 60,
+            "selected": 56,
+            "kind": 66,
             "status": 105,
             "folder": 145,
             "name": 230,
-            "output": 90,
+            "output": 96,
             "stage": 135,
-            "elapsed": 65,
+            "elapsed": 66,
             "message": MESSAGE_MIN_WIDTH,
         }
         # stretch 열이 있으면 Tk가 열 폭 합계를 목록 폭에 맞춰 줄여서 가로 스크롤이 메시지 끝까지
         # 가지 못합니다. 폭을 고정하고 메시지 열만 내용과 남는 공간에 맞춰 직접 조절합니다.
-        for column in columns:
-            self.tree.heading(column, text=headings[column])
+        for column in SORT_COLUMNS:
+            self.tree.heading(column, command=lambda column=column: self._sort_by(column))
             self.tree.column(column, width=widths[column], minwidth=40, stretch=False)
+        self._refresh_headings()
         vertical = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.tree.yview)
         horizontal = ttk.Scrollbar(tree_frame, orient=tk.HORIZONTAL, command=self.tree.xview)
         self.tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
@@ -407,8 +456,10 @@ class SubtitleBatcherApp:
                 self._set_status("미디어 폴더를 찾을 수 없습니다.")
             else:
                 self._set_status("'폴더 선택'으로 영상·녹음 파일이 있는 폴더를 고르세요.")
+            self._refresh_watch_state()
             return
         self.settings.root_directory = str(root_path)
+        self._scanned_root = root_path
         self._hide_tooltip()
         self.entries.clear()
         self.selected.clear()
@@ -417,15 +468,162 @@ class SubtitleBatcherApp:
             iid = self._iid(entry.path)
             self.entries[iid] = entry
             self.tree.insert("", tk.END, iid=iid, values=self._row_values(iid, entry))
+        # 같은 폴더를 다시 검색한 경우, 감시로 대기 중이던 파일은 그대로 대기시킵니다.
+        self._watch_queue = [iid for iid in self._watch_queue if iid in self.entries]
+        for iid in self._watch_queue:
+            self._mark_watch_queued(self.entries[iid])
+            self._refresh_row(iid)
+        self._apply_order()
         self._set_status(f"미디어 {len(self.entries)}개 검색 완료")
         self._update_count()
         self._fit_message_column()
+        self._sync_watcher()
 
     def _browse(self) -> None:
         selected = filedialog.askdirectory(initialdir=self.root_var.get() or None)
         if selected:
             self.root_var.set(selected)
             self._scan()
+
+    def _sort_by(self, column: str) -> None:
+        self._hide_tooltip()
+        if column == self._sort_column:
+            self._sort_descending = not self._sort_descending
+        else:
+            self._sort_column = column
+            self._sort_descending = False
+        self._refresh_headings()
+        self._apply_order()
+
+    def _refresh_headings(self) -> None:
+        for column in SORT_COLUMNS:
+            self.tree.heading(
+                column, text=heading_text(column, self._sort_column, self._sort_descending)
+            )
+
+    def _apply_order(self) -> None:
+        ordered = sorted_ids(self.entries, self.selected, self._sort_column, self._sort_descending)
+        if ordered != list(self.tree.get_children()):
+            for index, iid in enumerate(ordered):
+                self.tree.move(iid, "", index)
+
+    def _sync_watcher(self) -> None:
+        root_path = self._scanned_root if self.watch_var.get() else None
+        current = self._watcher
+        if current is not None and current.root != root_path:
+            current.stop()
+            self._watcher = current = None
+            self._watch_report = None
+        if root_path is None:
+            self._drop_watch_queue("폴더 감시를 꺼서 자동으로 처리하지 않았습니다.")
+        elif current is None:
+            self._watcher = FolderWatcher(
+                root_path,
+                lambda source, report: self.events.put(
+                    ControllerEvent(kind="watch", payload=(source, report))
+                ),
+            )
+            self._watcher.start()
+        self._refresh_watch_state()
+
+    def _refresh_watch_state(self) -> None:
+        self.watch_state_var.set(
+            watch_state_text(
+                enabled=bool(self.watch_var.get()),
+                has_folder=self._scanned_root is not None,
+                report=self._watch_report,
+                queued=len(self._watch_queue),
+                engine_ready=self.ready,
+            )
+        )
+
+    def _handle_watch(self, source: FolderWatcher, report: WatchReport) -> None:
+        # 폴더를 바꾸거나 감시를 끈 뒤에 도착한 이전 감시의 보고는 버립니다.
+        if source is not self._watcher:
+            return
+        self._watch_report = report
+        found = 0
+        for path in report.ready:
+            iid = self._iid(path)
+            entry = self.entries.get(iid)
+            if entry is None:
+                entry = media_entry(path, source.root)
+                if entry is None:
+                    continue
+                self.entries[iid] = entry
+                self.tree.insert("", tk.END, iid=iid, values=self._row_values(iid, entry))
+            else:
+                # '다시 검색'으로 먼저 목록에 올라온 파일입니다. 이미 처리 중이거나 대기 중이거나
+                # 그사이 결과가 생겼으면 그대로 둡니다.
+                if iid in self._batch_iids or iid in self._watch_queue:
+                    continue
+                entry.existing_outputs = matching_outputs(entry.path)
+                if entry.has_output:
+                    self._refresh_row(iid)
+                    continue
+            found += 1
+            if entry.has_output:
+                entry.message = "새로 추가됐지만 결과 파일이 이미 있어 자동으로 처리하지 않았습니다."
+            else:
+                self._mark_watch_queued(entry)
+                self._watch_queue.append(iid)
+            self._refresh_row(iid)
+        if found:
+            self._apply_order()
+            self._update_count()
+            self._fit_message_column()
+            self._set_status(f"폴더 감시: 새 파일 {found}개를 찾았습니다.")
+        self._refresh_watch_state()
+
+    @staticmethod
+    def _mark_watch_queued(entry: MediaEntry) -> None:
+        entry.status = JobStatus.WAITING
+        entry.stage = WATCH_STAGE
+        entry.message = "폴더 감시로 찾은 새 파일입니다. 차례가 되면 자동으로 생성합니다."
+
+    def _drop_watch_queue(self, message: str) -> None:
+        for iid in self._watch_queue:
+            entry = self.entries.get(iid)
+            if entry is not None:
+                entry.stage = ""
+                entry.message = message
+                self._refresh_row(iid)
+        if self._watch_queue:
+            self._watch_queue.clear()
+            self._fit_message_column()
+
+    def _start_watch_jobs(self) -> None:
+        if not self.ready or self.controller.busy:
+            return
+        ordered: list[str] = []
+        for iid in self._watch_queue:
+            entry = self.entries.get(iid)
+            if entry is None:
+                continue
+            if not entry.path.is_file():
+                # 처리하기 전에 사라진 임시 파일은 목록에서도 뺍니다.
+                del self.entries[iid]
+                self.selected.discard(iid)
+                self.tree.delete(iid)
+                continue
+            entry.existing_outputs = matching_outputs(entry.path)
+            if entry.has_output:
+                entry.stage = ""
+                entry.message = "결과 파일이 이미 있어 자동으로 처리하지 않았습니다."
+                self._refresh_row(iid)
+                continue
+            ordered.append(iid)
+        self._watch_queue = ordered
+        if ordered:
+            self._launch(ordered, JobMode.ADAPTIVE)
+        self._update_count()
+        self._fit_message_column()
+        self._refresh_watch_state()
+
+    def _stop(self) -> None:
+        self._drop_watch_queue("중지해서 자동으로 처리하지 않았습니다.")
+        self._refresh_watch_state()
+        self.controller.cancel()
 
     def _select_without_outputs(self) -> None:
         self.selected = {iid for iid, entry in self.entries.items() if not entry.has_output}
@@ -593,6 +791,10 @@ class SubtitleBatcherApp:
                 "기존 SRT/TXT는 각각 .bak 하나로 교체됩니다.",
             ):
                 return
+        if not self._launch(ordered, mode):
+            messagebox.showwarning(APP_DISPLAY_NAME, "다른 작업이 이미 진행 중입니다.")
+
+    def _launch(self, ordered: list[str], mode: JobMode) -> bool:
         glossary = normalize_glossary(self.glossary_text.get("1.0", "end-1c"))
         audio_txt_timestamps = bool(self.audio_timestamp_var.get())
         jobs = [
@@ -605,15 +807,19 @@ class SubtitleBatcherApp:
             )
             for iid in ordered
         ]
+        if not self.controller.start_jobs(jobs):
+            return False
+        self._batch_iids = set(ordered)
+        # 방금 시작한 파일은 감시 대기에서 빼서 두 번 처리하지 않습니다.
+        self._watch_queue = [iid for iid in self._watch_queue if iid not in self._batch_iids]
         for iid in ordered:
             entry = self.entries[iid]
             entry.status = JobStatus.WAITING
-            entry.stage = "대기열"
+            entry.stage = QUEUED_STAGE
             entry.message = ""
             self._refresh_row(iid)
         self._fit_message_column()
-        if not self.controller.start_jobs(jobs):
-            messagebox.showwarning(APP_DISPLAY_NAME, "다른 작업이 이미 진행 중입니다.")
+        return True
 
     def _repair(self) -> None:
         # 미설치 상태에서는 빠진 구성만 받고, 설치가 끝난 상태에서만 전체를 다시 설치합니다.
@@ -633,10 +839,14 @@ class SubtitleBatcherApp:
                 self._handle_event(self.events.get_nowait())
         except queue.Empty:
             pass
+        if self._watch_queue:
+            self._start_watch_jobs()
         self.root.after(self.POLL_MS, self._drain_events)
 
     def _handle_event(self, event: ControllerEvent) -> None:
-        if event.kind in {"setup_started", "batch_started"}:
+        if event.kind == "watch":
+            self._handle_watch(*event.payload)
+        elif event.kind in {"setup_started", "batch_started"}:
             self._set_action_state(False)
             self.repair_button.configure(state=tk.DISABLED)
             self.stop_button.configure(state=tk.NORMAL)
@@ -666,9 +876,11 @@ class SubtitleBatcherApp:
             self._set_progress(1.0)
         elif event.kind == "idle":
             self.ready = self.runtime.ready()
+            self._batch_iids.clear()
             self._set_action_state(self.ready)
             self.repair_button.configure(state=tk.NORMAL)
             self.stop_button.configure(state=tk.DISABLED)
+            self._refresh_watch_state()
 
     def _update_video_event(self, video: Path, event: ControllerEvent) -> None:
         iid = self._iid(video)
@@ -762,7 +974,12 @@ class SubtitleBatcherApp:
             return
         if self.controller.busy:
             self.controller.cancel()
+        if self._watcher is not None:
+            self._watcher.stop()
         self._hide_tooltip()
+        self.settings.watch_folder = bool(self.watch_var.get())
+        self.settings.sort_column = self._sort_column
+        self.settings.sort_descending = self._sort_descending
         self.settings.root_directory = self.root_var.get().strip()
         self.settings.glossary_text = self.glossary_text.get("1.0", "end-1c")
         self.settings.window_geometry = self.root.geometry()

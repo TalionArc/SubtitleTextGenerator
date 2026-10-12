@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 3, 0, 0),
-    prodvers=(1, 3, 0, 0),
+    filevers=(1, 4, 0, 0),
+    prodvers=(1, 4, 0, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -16,11 +16,11 @@ VSVersionInfo(
         [
           StringStruct(u'CompanyName', u'Local'),
           StringStruct(u'FileDescription', u'영상·녹음 자막 텍스트 생성기'),
-          StringStruct(u'FileVersion', u'1.3.0'),
+          StringStruct(u'FileVersion', u'1.4.0'),
           StringStruct(u'InternalName', u'SubtitleTextGenerator'),
           StringStruct(u'OriginalFilename', u'SubtitleTextGenerator.exe'),
           StringStruct(u'ProductName', u'영상·녹음 자막 텍스트 생성기'),
-          StringStruct(u'ProductVersion', u'1.3.0')
+          StringStruct(u'ProductVersion', u'1.4.0')
         ]
       )
     ]),

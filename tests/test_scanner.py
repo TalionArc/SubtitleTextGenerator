@@ -9,9 +9,31 @@ from subtitle_text_generator.models import MediaKind
 from subtitle_text_generator.scanner import (
     matching_outputs,
     matching_subtitles,
+    media_entry,
     scan_media,
     scan_videos,
 )
+
+
+def test_media_entry_describes_one_file_and_rejects_others(tmp_path: Path) -> None:
+    audio = tmp_path / "새 녹음" / "회의.M4A"
+    audio.parent.mkdir()
+    audio.write_bytes(b"audio")
+    (audio.parent / "회의.txt").write_text("x", encoding="utf-8")
+    (tmp_path / "메모.txt").write_text("x", encoding="utf-8")
+
+    entry = media_entry(audio, tmp_path)
+
+    assert entry is not None
+    assert entry.path == audio.resolve()
+    assert entry.kind is MediaKind.AUDIO
+    assert entry.size == 5
+    assert entry.relative_parent == "새 녹음"
+    assert [path.name for path in entry.existing_outputs] == ["회의.txt"]
+    assert entry == scan_media(tmp_path)[0]
+    assert media_entry(tmp_path / "메모.txt", tmp_path) is None
+    assert media_entry(tmp_path / "없는 파일.mp4", tmp_path) is None
+    assert media_entry(audio.parent, tmp_path) is None
 
 
 def test_matching_subtitles_exact_and_language_suffix(tmp_path: Path) -> None:

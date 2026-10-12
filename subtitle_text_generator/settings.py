@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .app_paths import AppPaths
 from .constants import DEFAULT_ROOT
+from .sorting import SORT_COLUMNS
 
 
 @dataclass(slots=True)
@@ -16,6 +17,9 @@ class Settings:
     window_geometry: str = "1120x720"
     audio_txt_timestamps: bool = True
     skip_setup_prompt: bool = False
+    watch_folder: bool = False
+    sort_column: str = ""
+    sort_descending: bool = False
 
 
 def load_settings(paths: AppPaths) -> Settings:
@@ -24,12 +28,18 @@ def load_settings(paths: AppPaths) -> Settings:
         audio_txt_timestamps = data.get("audio_txt_timestamps", True)
         if not isinstance(audio_txt_timestamps, bool):
             audio_txt_timestamps = True
+        sort_column = data.get("sort_column")
+        if sort_column not in SORT_COLUMNS:
+            sort_column = ""
         return Settings(
             root_directory=str(data.get("root_directory") or DEFAULT_ROOT),
             glossary_text=str(data.get("glossary_text") or ""),
             window_geometry=str(data.get("window_geometry") or "1120x720"),
             audio_txt_timestamps=audio_txt_timestamps,
             skip_setup_prompt=data.get("skip_setup_prompt") is True,
+            watch_folder=data.get("watch_folder") is True,
+            sort_column=sort_column,
+            sort_descending=data.get("sort_descending") is True,
         )
     except (OSError, ValueError, TypeError):
         return Settings()
