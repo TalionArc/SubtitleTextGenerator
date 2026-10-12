@@ -213,6 +213,7 @@ class SubtitleBatcherApp:
         self._watcher: FolderWatcher | None = None
         self._watch_report: WatchReport | None = None
         self._watch_queue: list[str] = []
+        self._watch_batch = 0
         self._batch_iids: set[str] = set()
         self._tooltip: tk.Toplevel | None = None
         self._tooltip_after: str | None = None
@@ -543,6 +544,7 @@ class SubtitleBatcherApp:
             return
         self._watch_report = report
         found = 0
+        first_found = ""
         for path in report.ready:
             iid = self._iid(path)
             entry = self.entries.get(iid)
@@ -562,6 +564,7 @@ class SubtitleBatcherApp:
                     self._refresh_row(iid)
                     continue
             found += 1
+            first_found = first_found or iid
             if entry.has_output:
                 entry.message = "새로 추가됐지만 결과 파일이 이미 있어 자동으로 처리하지 않았습니다."
             else:
@@ -572,8 +575,15 @@ class SubtitleBatcherApp:
             self._apply_order()
             self._update_count()
             self._fit_message_column()
+            self._reveal(first_found)
             self._set_status(f"폴더 감시: 새 파일 {found}개를 찾았습니다.")
         self._refresh_watch_state()
+
+    def _reveal(self, iid: str) -> None:
+        # 정렬 순서에 따라 새 행이 화면 밖에 놓이므로, 보이는 곳으로 스크롤하고 강조합니다.
+        if self.tree.exists(iid):
+            self.tree.selection_set(iid)
+            self.tree.see(iid)
 
     @staticmethod
     def _mark_watch_queued(entry: MediaEntry) -> None:
@@ -614,14 +624,15 @@ class SubtitleBatcherApp:
                 continue
             ordered.append(iid)
         self._watch_queue = ordered
-        if ordered:
-            self._launch(ordered, JobMode.ADAPTIVE)
+        if ordered and self._launch(ordered, JobMode.ADAPTIVE):
+            self._watch_batch = len(ordered)
         self._update_count()
         self._fit_message_column()
         self._refresh_watch_state()
 
     def _stop(self) -> None:
         self._drop_watch_queue("중지해서 자동으로 처리하지 않았습니다.")
+        self._watch_batch = 0
         self._refresh_watch_state()
         self.controller.cancel()
 
@@ -872,11 +883,17 @@ class SubtitleBatcherApp:
         elif event.kind == "cancelling":
             self._set_status(event.message)
         elif event.kind == "batch_finished":
-            self._set_status(event.message)
+            if self._watch_batch:
+                self._set_status(
+                    f"폴더 감시: 새 파일 {self._watch_batch}개의 자동 처리가 끝났습니다."
+                )
+            else:
+                self._set_status(event.message)
             self._set_progress(1.0)
         elif event.kind == "idle":
             self.ready = self.runtime.ready()
             self._batch_iids.clear()
+            self._watch_batch = 0
             self._set_action_state(self.ready)
             self.repair_button.configure(state=tk.NORMAL)
             self.stop_button.configure(state=tk.DISABLED)
@@ -903,6 +920,7 @@ class SubtitleBatcherApp:
                 JobStatus.SKIPPED,
             }:
                 entry.stage = "완료"
+            self._update_count()
         self._refresh_row(iid)
         self._fit_message_column()
 
