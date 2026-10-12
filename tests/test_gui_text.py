@@ -11,6 +11,7 @@ from subtitle_text_generator.gui import (
     heading_text,
     setup_prompt_text,
     single_line_preview,
+    watch_result_text,
     watch_state_text,
 )
 from subtitle_text_generator.models import JobStatus, MediaEntry, MediaKind
@@ -81,6 +82,21 @@ def test_watch_state_text_explains_what_the_watcher_is_doing() -> None:
     assert text(queued=3, engine_ready=False) == (
         "감시 중 · 자동 처리 대기 3개 (인식 환경이 준비되면 시작)"
     )
+    assert text(running=True) == "감시 중 · 자동 처리 중"
+    latest = watch_result_text("회의 녹음.m4a", JobStatus.REVIEW, "13:55")
+    assert latest == "회의 녹음.m4a — 완료 / 검토 필요 (13:55)"
+    assert text(latest=latest) == f"감시 중 · 최근 자동 처리: {latest}"
+    assert text(report=WatchReport(settling=1), queued=2, running=True, latest=latest) == (
+        "감시 중 · 새 파일 1개의 복사가 끝나기를 기다리는 중 · 자동 처리 대기 2개 · "
+        f"자동 처리 중 · 최근 자동 처리: {latest}"
+    )
+    assert text(enabled=False, latest=latest) == ""
+
+
+def test_watch_result_text_shortens_long_file_names() -> None:
+    shown = watch_result_text("가" * 200 + ".m4a", JobStatus.COMPLETE, "09:05")
+    assert shown.endswith("… — 완료 (09:05)")
+    assert len(shown) < 70
 
 
 def test_detail_text_keeps_the_full_message(tmp_path: Path) -> None:

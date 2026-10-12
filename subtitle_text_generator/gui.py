@@ -4,6 +4,7 @@ import hashlib
 import os
 import queue
 import shutil
+import time
 import tkinter as tk
 from contextlib import suppress
 from pathlib import Path
@@ -52,6 +53,7 @@ COLUMN_HEADINGS = {
 }
 QUEUED_STAGE = "대기열"
 WATCH_STAGE = "감시 대기"
+WATCH_NAME_CHARS = 48
 
 
 def single_line_preview(text: str, limit: int = MESSAGE_PREVIEW_CHARS) -> str:
@@ -99,6 +101,8 @@ def watch_state_text(
     report: WatchReport | None,
     queued: int,
     engine_ready: bool,
+    running: bool = False,
+    latest: str = "",
 ) -> str:
     if not enabled:
         return ""
@@ -114,9 +118,17 @@ def watch_state_text(
     if queued:
         waiting = f"자동 처리 대기 {queued}개"
         parts.append(waiting if engine_ready else f"{waiting} (인식 환경이 준비되면 시작)")
+    if running:
+        parts.append("자동 처리 중")
+    if latest:
+        parts.append(f"최근 자동 처리: {latest}")
     if len(parts) == 1:
         parts.append("지금부터 추가되는 파일만 자동으로 처리합니다.")
     return " · ".join(parts)
+
+
+def watch_result_text(name: str, status: JobStatus, clock: str) -> str:
+    return f"{single_line_preview(name, WATCH_NAME_CHARS)} — {status.value} ({clock})"
 
 
 def entry_detail_text(entry: MediaEntry) -> str:
@@ -214,6 +226,7 @@ class SubtitleBatcherApp:
         self._watch_report: WatchReport | None = None
         self._watch_queue: list[str] = []
         self._watch_batch = 0
+        self._watch_latest = ""
         self._batch_iids: set[str] = set()
         self._tooltip: tk.Toplevel | None = None
         self._tooltip_after: str | None = None
@@ -535,6 +548,8 @@ class SubtitleBatcherApp:
                 report=self._watch_report,
                 queued=len(self._watch_queue),
                 engine_ready=self.ready,
+                running=bool(self._watch_batch),
+                latest=self._watch_latest,
             )
         )
 
@@ -544,7 +559,6 @@ class SubtitleBatcherApp:
             return
         self._watch_report = report
         found = 0
-        first_found = ""
         for path in report.ready:
             iid = self._iid(path)
             entry = self.entries.get(iid)
@@ -564,7 +578,6 @@ class SubtitleBatcherApp:
                     self._refresh_row(iid)
                     continue
             found += 1
-            first_found = first_found or iid
             if entry.has_output:
                 entry.message = "새로 추가됐지만 결과 파일이 이미 있어 자동으로 처리하지 않았습니다."
             else:
@@ -575,15 +588,8 @@ class SubtitleBatcherApp:
             self._apply_order()
             self._update_count()
             self._fit_message_column()
-            self._reveal(first_found)
             self._set_status(f"폴더 감시: 새 파일 {found}개를 찾았습니다.")
         self._refresh_watch_state()
-
-    def _reveal(self, iid: str) -> None:
-        # 정렬 순서에 따라 새 행이 화면 밖에 놓이므로, 보이는 곳으로 스크롤하고 강조합니다.
-        if self.tree.exists(iid):
-            self.tree.selection_set(iid)
-            self.tree.see(iid)
 
     @staticmethod
     def _mark_watch_queued(entry: MediaEntry) -> None:
@@ -878,6 +884,12 @@ class SubtitleBatcherApp:
             self._update_video_event(event.video, event)
         elif event.kind == "job_finished" and event.video:
             self._update_video_event(event.video, event)
+            if self._watch_batch and event.status is not None:
+                # 새 행이 정렬 순서상 화면 밖에 있어도 결과를 알 수 있게 감시 문구에 남깁니다.
+                self._watch_latest = watch_result_text(
+                    event.video.name, event.status, time.strftime("%H:%M")
+                )
+                self._refresh_watch_state()
             if event.status is JobStatus.FAILED:
                 self._set_status(f"실패: {event.video.name} — {event.message}")
         elif event.kind == "cancelling":
