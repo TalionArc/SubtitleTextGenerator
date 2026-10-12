@@ -14,6 +14,7 @@ from .constants import MEDIA_EXTENSIONS
 WATCH_INTERVAL_SECONDS = 3.0
 # 복사·다운로드·녹화 중인 파일을 건드리지 않도록, 크기와 수정 시각이 이만큼 그대로일 때만 처리합니다.
 WATCH_SETTLE_SECONDS = 9.0
+WATCH_MAX_INTERVAL_SECONDS = 30.0
 
 _GENERIC_READ = 0x80000000
 _FILE_SHARE_READ = 0x00000001
@@ -187,8 +188,10 @@ class FolderWatcher:
         delay = 0.0
         while not self._stop_event.wait(delay):
             started = time.monotonic()
+            listing_seconds = 0.0
             try:
                 present = list_media(self.root)
+                listing_seconds = time.monotonic() - started
                 if present is None:
                     report = WatchReport(available=False)
                 elif tracker is None:
@@ -206,8 +209,18 @@ class FolderWatcher:
             if report.ready or report != last:
                 self._callback(self, report)
             last = WatchReport(settling=report.settling, available=report.available)
-            # 파일이 아주 많은 폴더에서도 검색이 CPU를 계속 붙잡지 않도록 쉬는 시간을 늘립니다.
-            delay = max(self._interval_seconds, (time.monotonic() - started) * 5)
+            delay = next_delay(self._interval_seconds, listing_seconds)
+
+
+def next_delay(interval_seconds: float, listing_seconds: float) -> float:
+    """Seconds to wait before looking at the folder again.
+
+    A slow listing (huge folder, slow drive) stretches the wait so the watch does not keep the
+    disk busy, but only up to WATCH_MAX_INTERVAL_SECONDS: one stalled look must not turn into
+    minutes before a new file is picked up.
+    """
+    longest = max(interval_seconds, WATCH_MAX_INTERVAL_SECONDS)
+    return min(max(interval_seconds, listing_seconds * 5), longest)
 
 
 def _is_junction(item: os.DirEntry[str]) -> bool:

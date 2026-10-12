@@ -7,11 +7,13 @@ from pathlib import Path
 import pytest
 
 from subtitle_text_generator.watcher import (
+    WATCH_MAX_INTERVAL_SECONDS,
     FolderWatcher,
     NewFileTracker,
     WatchReport,
     is_file_free,
     list_media,
+    next_delay,
 )
 
 SETTLE = 9.0
@@ -136,6 +138,16 @@ def test_ready_files_come_in_path_order(tmp_path: Path) -> None:
     tracker.update({second, first}, 0.0)
 
     assert tracker.update({second, first}, SETTLE) == ((first, second), 0)
+
+
+def test_slow_listing_stretches_the_wait_only_up_to_the_cap() -> None:
+    assert next_delay(3.0, 0.01) == 3.0
+    assert next_delay(3.0, 2.0) == 10.0
+    assert next_delay(3.0, 25.0) == WATCH_MAX_INTERVAL_SECONDS
+    assert next_delay(3.0, 600.0) == WATCH_MAX_INTERVAL_SECONDS
+    # 기본 간격이 상한보다 길게 설정돼 있으면 그 간격을 그대로 씁니다.
+    assert next_delay(60.0, 1.0) == 60.0
+    assert next_delay(0.05, 0.001) == 0.05
 
 
 @pytest.mark.skipif(os.name != "nt", reason="write-lock detection uses the Windows API")
