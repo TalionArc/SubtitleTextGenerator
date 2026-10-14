@@ -19,6 +19,7 @@ class Settings:
     skip_setup_prompt: bool = False
     watch_folder: bool = False
     watch_log: bool = True
+    auto_full_large: bool = True
     sort_column: str = ""
     sort_descending: bool = False
 
@@ -32,6 +33,9 @@ def load_settings(paths: AppPaths) -> Settings:
         watch_log = data.get("watch_log", True)
         if not isinstance(watch_log, bool):
             watch_log = True
+        auto_full_large = data.get("auto_full_large", True)
+        if not isinstance(auto_full_large, bool):
+            auto_full_large = True
         sort_column = data.get("sort_column")
         if sort_column not in SORT_COLUMNS:
             sort_column = ""
@@ -43,6 +47,7 @@ def load_settings(paths: AppPaths) -> Settings:
             skip_setup_prompt=data.get("skip_setup_prompt") is True,
             watch_folder=data.get("watch_folder") is True,
             watch_log=watch_log,
+            auto_full_large=auto_full_large,
             sort_column=sort_column,
             sort_descending=data.get("sort_descending") is True,
         )

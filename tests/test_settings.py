@@ -30,6 +30,7 @@ def test_settings_round_trip(tmp_path: Path) -> None:
         skip_setup_prompt=True,
         watch_folder=True,
         watch_log=False,
+        auto_full_large=False,
         sort_column="name",
         sort_descending=True,
     )
@@ -47,6 +48,7 @@ def test_old_settings_default_audio_timestamps_on(tmp_path: Path) -> None:
     assert loaded.root_directory == "C:/media"
     assert loaded.watch_folder is False
     assert loaded.watch_log is True
+    assert loaded.auto_full_large is True
     assert (loaded.sort_column, loaded.sort_descending) == ("", False)
 
 
@@ -65,6 +67,10 @@ def test_invalid_watch_and_sort_values_are_ignored(tmp_path: Path) -> None:
     assert loaded.watch_log is True
     paths.settings_file.write_text('{"watch_log": false}', encoding="utf-8")
     assert load_settings(paths).watch_log is False
+    paths.settings_file.write_text('{"auto_full_large": "no"}', encoding="utf-8")
+    assert load_settings(paths).auto_full_large is True
+    paths.settings_file.write_text('{"auto_full_large": false}', encoding="utf-8")
+    assert load_settings(paths).auto_full_large is False
 
 
 def test_non_boolean_skip_setup_prompt_is_ignored(tmp_path: Path) -> None:

@@ -125,6 +125,7 @@ class JobRequest:
     mode: JobMode
     glossary: tuple[str, ...] = ()
     audio_txt_timestamps: bool = True
+    auto_full_large: bool = True
 
 
 @dataclass(slots=True)

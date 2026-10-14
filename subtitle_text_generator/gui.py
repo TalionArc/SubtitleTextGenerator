@@ -25,6 +25,7 @@ from .controller import BatchController, ControllerEvent
 from .engine import EngineRunner
 from .models import JobMode, JobRequest, JobStatus, MediaEntry, MediaKind
 from .processor import JobProcessor
+from .quality import QUIET_MEAN_VOLUME_DB
 from .runtime import RuntimeManager
 from .scanner import matching_outputs, media_entry, scan_media
 from .settings import Settings, normalize_glossary, save_settings, valid_root_directory
@@ -283,6 +284,7 @@ class SubtitleBatcherApp:
             container, text="설정", style="Corner.TButton", command=self._open_settings
         ).place(in_=notebook, relx=1.0, y=0, anchor=tk.NE)
         self.watch_log_var = tk.BooleanVar(value=self.settings.watch_log)
+        self.auto_full_large_var = tk.BooleanVar(value=self.settings.auto_full_large)
 
         folder_row = ttk.Frame(work_tab)
         folder_row.pack(fill=tk.X, pady=(0, 8))
@@ -456,8 +458,26 @@ class SubtitleBatcherApp:
         body = ttk.Frame(window, padding=14)
         body.pack(fill=tk.BOTH, expand=True)
 
+        recognition = ttk.LabelFrame(body, text="인식", padding=10)
+        recognition.pack(fill=tk.X)
+        ttk.Checkbutton(
+            recognition,
+            text="불확실 구간이 30% 이상이면 전체를 large-v3로 자동으로 다시 인식",
+            variable=self.auto_full_large_var,
+            command=self._apply_settings,
+        ).pack(anchor=tk.W)
+        ttk.Label(
+            recognition,
+            text="Turbo 초안에서 의심스러운 구간이 많을 때만 작동하며, 그 파일은 몇 배 오래 걸립니다. "
+            "끄면 검토 필요로 표시하고 전체 large-v3를 권장하는 데서 멈춥니다.\n"
+            f"평균 음량이 {QUIET_MEAN_VOLUME_DB:.0f}dB보다 작은 녹음은 전체 large-v3로 인식하기 전에 "
+            "음량을 보정합니다. '선택 전체 large-v3'에도 똑같이 적용됩니다.",
+            justify=tk.LEFT,
+            wraplength="15c",
+        ).pack(anchor=tk.W, pady=(4, 0))
+
         watch = ttk.LabelFrame(body, text="폴더 감시", padding=10)
-        watch.pack(fill=tk.X)
+        watch.pack(fill=tk.X, pady=(12, 0))
         ttk.Checkbutton(
             watch,
             text="폴더 감시 기록을 로그 파일에 남기기",
@@ -523,6 +543,7 @@ class SubtitleBatcherApp:
     def _collect_settings(self) -> None:
         self.settings.watch_folder = bool(self.watch_var.get())
         self.settings.watch_log = bool(self.watch_log_var.get())
+        self.settings.auto_full_large = bool(self.auto_full_large_var.get())
         self.settings.sort_column = self._sort_column
         self.settings.sort_descending = self._sort_descending
         self.settings.root_directory = self.root_var.get().strip()
@@ -922,6 +943,7 @@ class SubtitleBatcherApp:
     def _launch(self, ordered: list[str], mode: JobMode) -> bool:
         glossary = normalize_glossary(self.glossary_text.get("1.0", "end-1c"))
         audio_txt_timestamps = bool(self.audio_timestamp_var.get())
+        auto_full_large = bool(self.auto_full_large_var.get())
         jobs = [
             JobRequest(
                 video=self.entries[iid].path,
@@ -929,6 +951,7 @@ class SubtitleBatcherApp:
                 mode=mode,
                 glossary=glossary,
                 audio_txt_timestamps=audio_txt_timestamps,
+                auto_full_large=auto_full_large,
             )
             for iid in ordered
         ]

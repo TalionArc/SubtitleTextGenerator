@@ -17,6 +17,10 @@ CORE_PADDING_SECONDS = 0.5
 CONTEXT_PADDING_SECONDS = 2.0
 MERGE_GAP_SECONDS = 3.0
 REVIEW_RATIO_THRESHOLD = 0.30
+# 평균 음량이 이보다 작으면 large-v3 전체 인식 전에 음량을 보정합니다. 휴대폰 강의 녹음은
+# -29 ~ -37dB였고, 보정 없이 large-v3로 인식하면 일부 구간이 "..."로 빠졌습니다.
+QUIET_MEAN_VOLUME_DB = -26.0
+LOUDNESS_FILTER = "highpass=f=80,lowpass=f=7500,dynaudnorm=f=250:g=15:p=0.9:m=30"
 
 _TOKEN_RE = re.compile(r"[0-9A-Za-z가-힣]+")
 

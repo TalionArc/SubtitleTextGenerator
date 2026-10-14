@@ -16,6 +16,8 @@ from .runtime import RuntimeManager
 LineCallback = Callable[[str], None]
 ProgressCallback = Callable[[float | None, str], None]
 
+_MEAN_VOLUME_RE = re.compile(r"mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB")
+
 
 class EngineExecutionError(RuntimeError):
     def __init__(self, message: str, *, output: str = "", returncode: int | None = None) -> None:
@@ -198,6 +200,108 @@ class EngineRunner:
             )
         progress(1.0, "인식 완료")
         return json_files[0]
+
+    def measure_mean_volume(self, source: Path, *, cancelled: Callable[[], bool]) -> float | None:
+        """Return the mean volume of the first audio track in dB, or None if it cannot be read."""
+        command = [
+            str(self.runtime.ffmpeg_executable()),
+            "-hide_banner",
+            "-nostats",
+            "-i",
+            str(source),
+            "-vn",
+            "-map",
+            "0:a:0",
+            "-af",
+            "volumedetect",
+            "-f",
+            "null",
+            "-",
+        ]
+        returncode, output = self._run_tool(command, cancelled)
+        match = _MEAN_VOLUME_RE.search(output)
+        if returncode != 0 or match is None:
+            return None
+        return float(match.group(1))
+
+    def normalize_audio(
+        self, source: Path, target: Path, audio_filter: str, *, cancelled: Callable[[], bool]
+    ) -> None:
+        """Write a 16 kHz mono WAV of the first audio track with the given loudness filter."""
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(target.stem + ".partial" + target.suffix)
+        command = [
+            str(self.runtime.ffmpeg_executable()),
+            "-hide_banner",
+            "-nostats",
+            "-y",
+            "-i",
+            str(source),
+            "-vn",
+            "-map",
+            "0:a:0",
+            "-af",
+            audio_filter,
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            "-c:a",
+            "pcm_s16le",
+            str(temporary),
+        ]
+        try:
+            returncode, output = self._run_tool(command, cancelled)
+            if returncode != 0 or not temporary.is_file() or temporary.stat().st_size <= 44:
+                tail = output.strip()[-600:]
+                raise EngineExecutionError(
+                    f"음량 보정 실패 (종료 코드 {returncode}): {tail or '출력 없음'}",
+                    output=output,
+                    returncode=returncode,
+                )
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _run_tool(self, command: list[str], cancelled: Callable[[], bool]) -> tuple[int, str]:
+        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        try:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=flags,
+            )
+        except OSError as exc:
+            raise EngineExecutionError(f"ffmpeg를 시작하지 못했습니다: {exc}") from exc
+        with self._lock:
+            self._process = process
+        chunks: list[str] = []
+
+        def read_errors() -> None:
+            assert process.stderr is not None
+            chunks.append(process.stderr.read())
+
+        reader = threading.Thread(target=read_errors, daemon=True)
+        reader.start()
+        try:
+            while process.poll() is None:
+                if cancelled():
+                    self.stop()
+                    raise EngineCancelled("사용자가 작업을 중지했습니다.")
+                time.sleep(0.1)
+            reader.join(timeout=5)
+        finally:
+            with self._lock:
+                if self._process is process:
+                    self._process = None
+        if cancelled():
+            raise EngineCancelled("사용자가 작업을 중지했습니다.")
+        return process.returncode, "".join(chunks)
 
     def stop(self) -> None:
         with self._lock:

@@ -186,6 +186,15 @@ class RuntimeManager:
             raise RuntimeSetupError("Faster-Whisper-XXL 실행 파일을 찾을 수 없습니다.")
         return candidates[0]
 
+    def ffmpeg_executable(self) -> Path:
+        bundled = self.engine_executable().parent / "ffmpeg.exe"
+        if bundled.is_file():
+            return bundled
+        candidates = sorted(self.paths.engine.rglob("ffmpeg.exe"))
+        if not candidates:
+            raise RuntimeSetupError("엔진에 들어 있는 ffmpeg.exe를 찾을 수 없습니다.")
+        return candidates[0]
+
     def model_path(self, key: str) -> Path:
         return self.paths.models / f"faster-whisper-{key}"
 
