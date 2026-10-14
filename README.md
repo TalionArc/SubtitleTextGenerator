@@ -8,6 +8,8 @@
 - 폴더 감시를 켜 두면 그 폴더에 새로 추가되는 파일을 자동으로 처리합니다.
 - `large-v3-turbo`로 빠르게 초안을 만든 뒤 신뢰도가 낮은 구간만 `large-v3`로 다시 인식합니다. 초안의 30% 이상이 의심스러우면 전체를 `large-v3`로 다시 인식하고, 휴대폰 녹음처럼 소리가 작으면 그 전에 음량을 보정합니다.
 
+> **English:** A local Korean speech-to-text app for Windows with an NVIDIA GPU. It turns videos into SRT subtitles and audio recordings into TXT transcripts with faster-whisper (a `large-v3-turbo` draft, then `large-v3` for uncertain parts). Nothing is uploaded; the first run downloads about 5.7 GB of engine and models. Recognition is Korean only, and the interface is in Korean.
+
 ## 시작 전에 확인하세요
 
 | 항목 | 내용 |
