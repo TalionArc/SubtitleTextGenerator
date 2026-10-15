@@ -12,6 +12,7 @@ from pathlib import Path
 from .app_paths import AppPaths
 from .constants import APP_VERSION, LARGE_MODEL, TURBO_MODEL
 from .engine import EngineCancelled, EngineExecutionError, EngineRun, EngineRunner, clip_argument
+from .hallucination import filter_hallucinations
 from .models import JobMode, JobRequest, JobResult, JobStatus, MediaKind, RefineWindow, Transcript
 from .quality import (
     LOUDNESS_FILTER,
@@ -23,7 +24,7 @@ from .quality import (
 )
 from .runtime import RuntimeManager, RuntimeSetupError
 from .scanner import matching_outputs, media_kind
-from .subtitles import commit_srt, commit_txt, cues_from_transcript
+from .subtitles import commit_srt, commit_txt, cues_from_transcript, format_txt_timestamp
 from .transcript import TranscriptError, load_transcript, transcript_is_valid
 
 StageCallback = Callable[[str, str, float | None], None]
@@ -209,6 +210,11 @@ class JobProcessor:
         if cancelled():
             raise EngineCancelled("사용자가 작업을 중지했습니다.")
         self._verify_source_unchanged(source, source_stat.st_size, source_stat.st_mtime_ns)
+        if request.filter_hallucinations:
+            final_transcript, filter_note = self._filter_hallucinations(
+                final_transcript, source_kind, log_path
+            )
+            message += filter_note
         allow_replace = request.mode in {JobMode.REPROCESS, JobMode.FULL_LARGE}
         if source_kind is MediaKind.AUDIO:
             timestamp_label = "타임스탬프 포함" if request.audio_txt_timestamps else "타임스탬프 제외"
@@ -236,6 +242,26 @@ class JobProcessor:
             uncertain_ratio=ratio,
             elapsed_seconds=elapsed,
         )
+
+    def _filter_hallucinations(
+        self, transcript: Transcript, source_kind: MediaKind, log_path: Path
+    ) -> tuple[Transcript, str]:
+        filtered, removed = filter_hallucinations(transcript, video=source_kind is MediaKind.VIDEO)
+        if not removed:
+            return transcript, ""
+        if not transcript_is_valid(filtered):
+            # 전부 헛소리로 보이면 빈 결과 대신 원래 결과를 저장합니다.
+            with suppress(OSError):
+                self._append_log(log_path, "filter", "남는 말이 없어 헛소리를 거르지 않았습니다.")
+            return transcript, ""
+        with suppress(OSError):
+            for item in removed:
+                self._append_log(
+                    log_path,
+                    "filter",
+                    f"{format_txt_timestamp(item.start)} {item.reason}: {item.text[:80]}",
+                )
+        return filtered, f" 헛소리 {len(removed)}곳을 걸렀습니다."
 
     def _run_cached_turbo(
         self,

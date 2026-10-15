@@ -1,6 +1,6 @@
 [project]
 name = "subtitle-text-generator"
-version = "1.6.0"
+version = "1.7.0"
 description = "Local Korean subtitle and transcript generator for Windows"
 requires-python = ">=3.11"
 

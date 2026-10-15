@@ -285,6 +285,7 @@ class SubtitleBatcherApp:
         ).place(in_=notebook, relx=1.0, y=0, anchor=tk.NE)
         self.watch_log_var = tk.BooleanVar(value=self.settings.watch_log)
         self.auto_full_large_var = tk.BooleanVar(value=self.settings.auto_full_large)
+        self.filter_hallucinations_var = tk.BooleanVar(value=self.settings.filter_hallucinations)
 
         folder_row = ttk.Frame(work_tab)
         folder_row.pack(fill=tk.X, pady=(0, 8))
@@ -475,6 +476,21 @@ class SubtitleBatcherApp:
             justify=tk.LEFT,
             wraplength="15c",
         ).pack(anchor=tk.W, pady=(4, 0))
+        ttk.Checkbutton(
+            recognition,
+            text="헛소리 거르기",
+            variable=self.filter_hallucinations_var,
+            command=self._apply_settings,
+        ).pack(anchor=tk.W, pady=(10, 0))
+        ttk.Label(
+            recognition,
+            text="말이 없거나 잡음뿐인 구간에 인식 모델이 지어내는 '다음 영상에서 만나요', "
+            "'잠시 쉬고...', '자막 제공 및 광고를 포함하고 있습니다' 같은 문장과, "
+            "같은 말이 계속 되풀이되는 부분을 결과에서 뺍니다. "
+            "영상에서는 실제로 말한 것으로 보이는 끝인사는 남깁니다. 뺀 내용은 작업 로그에 남습니다.",
+            justify=tk.LEFT,
+            wraplength="15c",
+        ).pack(anchor=tk.W, pady=(4, 0))
 
         watch = ttk.LabelFrame(body, text="폴더 감시", padding=10)
         watch.pack(fill=tk.X, pady=(12, 0))
@@ -544,6 +560,7 @@ class SubtitleBatcherApp:
         self.settings.watch_folder = bool(self.watch_var.get())
         self.settings.watch_log = bool(self.watch_log_var.get())
         self.settings.auto_full_large = bool(self.auto_full_large_var.get())
+        self.settings.filter_hallucinations = bool(self.filter_hallucinations_var.get())
         self.settings.sort_column = self._sort_column
         self.settings.sort_descending = self._sort_descending
         self.settings.root_directory = self.root_var.get().strip()
@@ -944,6 +961,7 @@ class SubtitleBatcherApp:
         glossary = normalize_glossary(self.glossary_text.get("1.0", "end-1c"))
         audio_txt_timestamps = bool(self.audio_timestamp_var.get())
         auto_full_large = bool(self.auto_full_large_var.get())
+        filter_hallucinations = bool(self.filter_hallucinations_var.get())
         jobs = [
             JobRequest(
                 video=self.entries[iid].path,
@@ -952,6 +970,7 @@ class SubtitleBatcherApp:
                 glossary=glossary,
                 audio_txt_timestamps=audio_txt_timestamps,
                 auto_full_large=auto_full_large,
+                filter_hallucinations=filter_hallucinations,
             )
             for iid in ordered
         ]

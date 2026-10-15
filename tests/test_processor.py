@@ -76,6 +76,7 @@ def _request(
     *,
     audio_txt_timestamps: bool = True,
     auto_full_large: bool = True,
+    filter_hallucinations: bool = True,
 ) -> JobRequest:
     return JobRequest(
         video=video,
@@ -84,6 +85,7 @@ def _request(
         glossary=("Whisper",),
         audio_txt_timestamps=audio_txt_timestamps,
         auto_full_large=auto_full_large,
+        filter_hallucinations=filter_hallucinations,
     )
 
 
@@ -550,3 +552,85 @@ def test_audio_existing_txt_skips_and_reprocess_creates_one_backup(
     assert "사용자의 기존 텍스트" in audio.with_suffix(".txt.bak").read_text(
         encoding="utf-8"
     )
+
+
+def _with_trailing_hallucination(payload: dict[str, object]) -> dict[str, object]:
+    result = deepcopy(payload)
+    result["duration"] = 30.0
+    result["segments"].append(  # type: ignore[union-attr]
+        {
+            "id": 2,
+            "start": 20.0,
+            "end": 23.0,
+            "text": " 다음 영상에서 만나요.",
+            "avg_logprob": -0.9,
+            "compression_ratio": 0.7,
+            "no_speech_prob": 0.6,
+            "temperature": 0.0,
+            "words": [
+                {"start": 20.0, "end": 20.6, "word": " 다음", "probability": 0.02},
+                {"start": 20.6, "end": 21.5, "word": " 영상에서", "probability": 0.7},
+                {"start": 21.5, "end": 23.0, "word": " 만나요.", "probability": 0.95},
+            ],
+        }
+    )
+    return result
+
+
+def test_hallucinated_phrase_is_filtered_from_txt_and_logged(
+    tmp_path: Path, clean_transcript_payload: dict[str, object]
+) -> None:
+    audio = tmp_path / "회의 녹음.m4a"
+    audio.write_bytes(b"audio")
+    processor = _processor(tmp_path, FakeEngine(_with_trailing_hallucination(clean_transcript_payload)))
+    result = processor.process(_request(audio), cancelled=lambda: False, progress=lambda *_: None)
+    text = audio.with_suffix(".txt").read_text(encoding="utf-8-sig")
+    assert "만나요" not in text
+    assert "오늘 주제는 테스트입니다." in text
+    assert result.message.endswith("헛소리 1곳을 걸렀습니다.")
+    logs = "".join(path.read_text(encoding="utf-8") for path in processor.paths.logs.glob("*.log"))
+    assert "[filter] 00:00:20.000 헛소리 문구: 다음 영상에서 만나요." in logs
+
+
+def test_hallucination_filter_can_be_turned_off(
+    tmp_path: Path, clean_transcript_payload: dict[str, object]
+) -> None:
+    audio = tmp_path / "회의 녹음.m4a"
+    audio.write_bytes(b"audio")
+    processor = _processor(tmp_path, FakeEngine(_with_trailing_hallucination(clean_transcript_payload)))
+    result = processor.process(
+        _request(audio, filter_hallucinations=False), cancelled=lambda: False, progress=lambda *_: None
+    )
+    assert "다음 영상에서 만나요." in audio.with_suffix(".txt").read_text(encoding="utf-8-sig")
+    assert "헛소리" not in result.message
+
+
+def test_filter_keeps_original_when_nothing_would_remain(tmp_path: Path) -> None:
+    audio = tmp_path / "빈 녹음.m4a"
+    audio.write_bytes(b"audio")
+    payload = {
+        "language": "ko",
+        "duration": 10.0,
+        "segments": [
+            {
+                "id": 0,
+                "start": 2.0,
+                "end": 4.0,
+                "text": " 잠시 쉬고...",
+                "avg_logprob": -0.2,
+                "compression_ratio": 0.7,
+                "no_speech_prob": 0.0,
+                "temperature": 0.0,
+                "words": [
+                    {"start": 2.0, "end": 2.5, "word": " 잠시", "probability": 0.9},
+                    {"start": 2.5, "end": 4.0, "word": " 쉬고...", "probability": 0.9},
+                ],
+            }
+        ],
+    }
+    processor = _processor(tmp_path, FakeEngine(payload))
+    result = processor.process(_request(audio), cancelled=lambda: False, progress=lambda *_: None)
+    assert "잠시 쉬고..." in audio.with_suffix(".txt").read_text(encoding="utf-8-sig")
+    assert "헛소리" not in result.message
+    logs = "".join(path.read_text(encoding="utf-8") for path in processor.paths.logs.glob("*.log"))
+    assert "남는 말이 없어 헛소리를 거르지 않았습니다." in logs

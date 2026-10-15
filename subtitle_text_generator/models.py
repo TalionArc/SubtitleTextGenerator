@@ -126,6 +126,7 @@ class JobRequest:
     glossary: tuple[str, ...] = ()
     audio_txt_timestamps: bool = True
     auto_full_large: bool = True
+    filter_hallucinations: bool = True
 
 
 @dataclass(slots=True)

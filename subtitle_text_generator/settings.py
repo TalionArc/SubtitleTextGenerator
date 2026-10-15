@@ -20,6 +20,7 @@ class Settings:
     watch_folder: bool = False
     watch_log: bool = True
     auto_full_large: bool = True
+    filter_hallucinations: bool = True
     sort_column: str = ""
     sort_descending: bool = False
 
@@ -36,6 +37,9 @@ def load_settings(paths: AppPaths) -> Settings:
         auto_full_large = data.get("auto_full_large", True)
         if not isinstance(auto_full_large, bool):
             auto_full_large = True
+        filter_hallucinations = data.get("filter_hallucinations", True)
+        if not isinstance(filter_hallucinations, bool):
+            filter_hallucinations = True
         sort_column = data.get("sort_column")
         if sort_column not in SORT_COLUMNS:
             sort_column = ""
@@ -48,6 +52,7 @@ def load_settings(paths: AppPaths) -> Settings:
             watch_folder=data.get("watch_folder") is True,
             watch_log=watch_log,
             auto_full_large=auto_full_large,
+            filter_hallucinations=filter_hallucinations,
             sort_column=sort_column,
             sort_descending=data.get("sort_descending") is True,
         )
