@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from subtitle_text_generator.app_paths import AppPaths
+from subtitle_text_generator.corrections import parse_corrections
 from subtitle_text_generator.engine import EngineCancelled, EngineExecutionError
 from subtitle_text_generator.models import JobMode, JobRequest, JobStatus
 from subtitle_text_generator.processor import JobProcessor, SourceChangedError, job_identity
@@ -603,6 +605,31 @@ def test_hallucination_filter_can_be_turned_off(
     )
     assert "다음 영상에서 만나요." in audio.with_suffix(".txt").read_text(encoding="utf-8-sig")
     assert "헛소리" not in result.message
+
+
+def test_corrections_rewrite_terms_after_filtering_and_are_logged(
+    tmp_path: Path, clean_transcript_payload: dict[str, object]
+) -> None:
+    audio = tmp_path / "회의 녹음.m4a"
+    audio.write_bytes(b"audio")
+    processor = _processor(tmp_path, FakeEngine(_with_trailing_hallucination(clean_transcript_payload)))
+    request = replace(_request(audio), corrections=parse_corrections("테스트 → 시험\n주제 → 화제"))
+    result = processor.process(request, cancelled=lambda: False, progress=lambda *_: None)
+    text = audio.with_suffix(".txt").read_text(encoding="utf-8-sig")
+    assert "오늘 화제는 시험입니다." in text
+    assert "만나요" not in text
+    assert result.message.endswith("헛소리 1곳을 걸렀습니다. 용어 2곳을 고쳐 썼습니다.")
+    logs = "".join(path.read_text(encoding="utf-8") for path in processor.paths.logs.glob("*.log"))
+    assert "[correct] 테스트 → 시험: 1곳" in logs
+    # 고쳐 쓰기는 인식 결과를 바꾸지 않으므로, 목록을 바꿔 재생성해도 캐시를 그대로 씁니다.
+    engine = processor.engine
+    calls = len(engine.calls)  # type: ignore[attr-defined]
+    again = replace(
+        _request(audio, JobMode.REPROCESS), corrections=parse_corrections("테스트 → 실험")
+    )
+    processor.process(again, cancelled=lambda: False, progress=lambda *_: None)
+    assert "오늘 주제는 실험입니다." in audio.with_suffix(".txt").read_text(encoding="utf-8-sig")
+    assert len(engine.calls) == calls  # type: ignore[attr-defined]
 
 
 def test_filter_keeps_original_when_nothing_would_remain(tmp_path: Path) -> None:

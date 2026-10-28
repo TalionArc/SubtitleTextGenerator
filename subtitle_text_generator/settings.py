@@ -14,6 +14,8 @@ from .sorting import SORT_COLUMNS
 class Settings:
     root_directory: str = DEFAULT_ROOT
     glossary_text: str = ""
+    corrections_text: str = ""
+    soundalike_terms_text: str = ""
     window_geometry: str = "1120x720"
     audio_txt_timestamps: bool = True
     skip_setup_prompt: bool = False
@@ -46,6 +48,8 @@ def load_settings(paths: AppPaths) -> Settings:
         return Settings(
             root_directory=str(data.get("root_directory") or DEFAULT_ROOT),
             glossary_text=str(data.get("glossary_text") or ""),
+            corrections_text=str(data.get("corrections_text") or ""),
+            soundalike_terms_text=str(data.get("soundalike_terms_text") or ""),
             window_geometry=str(data.get("window_geometry") or "1120x720"),
             audio_txt_timestamps=audio_txt_timestamps,
             skip_setup_prompt=data.get("skip_setup_prompt") is True,

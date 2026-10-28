@@ -5,6 +5,7 @@ import logging
 import os
 import queue
 import shutil
+import threading
 import time
 import tkinter as tk
 from contextlib import suppress
@@ -22,6 +23,14 @@ from .constants import (
     SETUP_INSTALLED_BYTES,
 )
 from .controller import BatchController, ControllerEvent
+from .corrections import (
+    MAX_CORRECTIONS,
+    Suggestion,
+    find_soundalikes,
+    format_correction,
+    output_lines,
+    parse_corrections,
+)
 from .engine import EngineRunner
 from .models import JobMode, JobRequest, JobStatus, MediaEntry, MediaKind
 from .processor import JobProcessor
@@ -233,6 +242,8 @@ class SubtitleBatcherApp:
         self._watch_latest = ""
         self._batch_iids: set[str] = set()
         self._settings_window: tk.Toplevel | None = None
+        self._soundalike_window: tk.Toplevel | None = None
+        self._soundalike_rows: dict[str, Suggestion] = {}
         self._repair_button: ttk.Button | None = None
         self._repair_state = tk.DISABLED
         self._tooltip: tk.Toplevel | None = None
@@ -417,32 +428,272 @@ class SubtitleBatcherApp:
         for sequence in ("<Leave>", "<ButtonPress>", "<MouseWheel>", "<Key>"):
             self.tree.bind(sequence, lambda _event: self._hide_tooltip(), add="+")
 
-        ttk.Label(
+        # 왼쪽은 인식에 힌트로 넣는 용어집, 오른쪽은 인식이 끝난 뒤 글자를 바꾸는 고쳐 쓰기입니다.
+        glossary_tab.columnconfigure(0, weight=1, uniform="glossary")
+        glossary_tab.columnconfigure(1, weight=1, uniform="glossary")
+        glossary_tab.rowconfigure(2, weight=1)
+        self.glossary_text = self._glossary_column(
             glossary_tab,
-            text="전역 용어집",
-            font=("Malgun Gothic", 11, "bold"),
-        ).pack(anchor=tk.W)
-        ttk.Label(
-            glossary_tab,
-            text="한 줄에 한 용어를 입력하세요. 중복을 제거해 최대 50개·500자까지 모든 작업에 적용합니다.",
-        ).pack(anchor=tk.W, pady=(3, 7))
-        glossary_frame = ttk.Frame(glossary_tab)
-        glossary_frame.pack(fill=tk.BOTH, expand=True)
-        self.glossary_text = tk.Text(glossary_frame, height=14, wrap=tk.WORD, undo=True)
-        self.glossary_text.insert("1.0", self.settings.glossary_text)
-        glossary_scroll = ttk.Scrollbar(
-            glossary_frame, orient=tk.VERTICAL, command=self.glossary_text.yview
+            0,
+            "용어집 (인식 힌트)",
+            "한 줄에 한 용어를 적으면 인식할 때 힌트로 넣습니다. 중복을 제거해 최대 50개·500자까지 "
+            "모든 작업에 적용합니다. 많이 넣을수록 인식이 흔들려 불확실 구간과 처리 시간이 늘 수 있으니, "
+            "자주 틀리는 몇 개만 넣고 나머지는 오른쪽 고쳐 쓰기를 쓰세요.",
+            self.settings.glossary_text,
         )
-        self.glossary_text.configure(yscrollcommand=glossary_scroll.set)
-        self.glossary_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        glossary_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.glossary_text.bind("<KeyRelease>", lambda _event: self._update_glossary_count())
         self.glossary_count_var = tk.StringVar()
-        ttk.Label(glossary_tab, textvariable=self.glossary_count_var).pack(anchor=tk.E, pady=(4, 0))
+        ttk.Label(glossary_tab, textvariable=self.glossary_count_var).grid(
+            row=3, column=0, sticky=tk.E, pady=(6, 0)
+        )
         self._update_glossary_count()
+
+        self.corrections_text = self._glossary_column(
+            glossary_tab,
+            1,
+            "고쳐 쓰기",
+            "'틀린 꼴 → 바른 꼴'을 한 줄에 하나씩 적으면 인식이 끝난 뒤 바꿉니다(예: 파이선 → 파이썬). "
+            "낱말 전체나 낱말+조사(파이선은 → 파이썬은)만 바꾸고 인식에는 영향이 없어, "
+            f"최대 {MAX_CORRECTIONS}줄까지 모든 작업에 적용합니다. 이미 만든 결과에는 '선택 재생성'으로 "
+            "적용됩니다.",
+            self.settings.corrections_text,
+        )
+        self.corrections_text.bind("<KeyRelease>", lambda _event: self._update_corrections_count())
+        corrections_row = ttk.Frame(glossary_tab)
+        corrections_row.grid(row=3, column=1, sticky=tk.EW, padx=(16, 0), pady=(6, 0))
+        ttk.Button(
+            corrections_row, text="비슷한 꼴 찾기…", command=self._open_soundalikes
+        ).pack(side=tk.LEFT)
+        self.corrections_count_var = tk.StringVar()
+        ttk.Label(corrections_row, textvariable=self.corrections_count_var).pack(side=tk.RIGHT)
+        self._update_corrections_count()
 
         self._set_action_state(False)
         self.stop_button.configure(state=tk.DISABLED)
+
+    @staticmethod
+    def _glossary_column(
+        parent: ttk.Frame, column: int, title: str, description: str, content: str
+    ) -> tk.Text:
+        padding = (16, 0) if column else (0, 0)
+        ttk.Label(parent, text=title, font=("Malgun Gothic", 11, "bold")).grid(
+            row=0, column=column, sticky=tk.W, padx=padding
+        )
+        label = ttk.Label(parent, text=description, justify=tk.LEFT, wraplength=420)
+        label.grid(row=1, column=column, sticky=tk.EW, padx=padding, pady=(3, 7))
+        # 창 너비에 맞춰 설명 줄을 접습니다.
+        label.bind("<Configure>", lambda event: label.configure(wraplength=max(event.width - 4, 200)))
+        frame = ttk.Frame(parent)
+        frame.grid(row=2, column=column, sticky=tk.NSEW, padx=padding)
+        text = tk.Text(frame, height=14, width=30, wrap=tk.WORD, undo=True)
+        text.insert("1.0", content)
+        scroll = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=text.yview)
+        text.configure(yscrollcommand=scroll.set)
+        text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        return text
+
+    def _open_soundalikes(self) -> None:
+        window = self._soundalike_window
+        if window is not None and window.winfo_exists():
+            window.deiconify()
+            window.lift()
+            window.focus_set()
+            return
+        window = tk.Toplevel(self.root)
+        self._soundalike_window = window
+        window.title(f"{APP_DISPLAY_NAME} — 비슷한 꼴 찾기")
+        window.transient(self.root)
+        window.geometry("980x560")
+        window.minsize(720, 400)
+        body = ttk.Frame(window, padding=12)
+        body.pack(fill=tk.BOTH, expand=True)
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(1, weight=1)
+
+        ttk.Label(body, text="찾을 바른 용어 (한 줄에 하나)").grid(row=0, column=0, sticky=tk.W)
+        guide = ttk.Label(
+            body,
+            text="지금 폴더의 결과 파일(TXT·SRT)에서 바른 용어와 소리가 비슷한 꼴을 찾습니다. "
+            "'모델'과 '모텔'처럼 진짜 낱말도 함께 나오므로, 실제로 틀린 것만 체크해 추가하세요. "
+            "줄을 누르면 체크가 바뀝니다.",
+            justify=tk.LEFT,
+            wraplength=640,
+        )
+        guide.grid(row=0, column=1, sticky=tk.EW, padx=(12, 0))
+        guide.bind("<Configure>", lambda event: guide.configure(wraplength=max(event.width - 4, 200)))
+
+        terms_frame = ttk.Frame(body)
+        terms_frame.grid(row=1, column=0, sticky=tk.NS, pady=(6, 0))
+        terms = tk.Text(terms_frame, width=22, wrap=tk.NONE, undo=True)
+        terms.insert("1.0", self._default_soundalike_terms())
+        terms_scroll = ttk.Scrollbar(terms_frame, orient=tk.VERTICAL, command=terms.yview)
+        terms.configure(yscrollcommand=terms_scroll.set)
+        terms.pack(side=tk.LEFT, fill=tk.Y, expand=True)
+        terms_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._soundalike_terms = terms
+
+        tree_frame = ttk.Frame(body)
+        tree_frame.grid(row=1, column=1, sticky=tk.NSEW, padx=(12, 0), pady=(6, 0))
+        tree_frame.rowconfigure(0, weight=1)
+        tree_frame.columnconfigure(0, weight=1)
+        columns = ("check", "term", "wrong", "count", "example")
+        tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="browse")
+        for name, heading, width, anchor, stretch in (
+            ("check", "추가", 44, tk.CENTER, False),
+            ("term", "바른 용어", 120, tk.W, False),
+            ("wrong", "찾은 꼴", 130, tk.W, False),
+            ("count", "횟수", 54, tk.E, False),
+            ("example", "예문", 360, tk.W, True),
+        ):
+            tree.heading(name, text=heading)
+            tree.column(name, width=width, minwidth=width if not stretch else 120, anchor=anchor, stretch=stretch)
+        tree_scroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=tree_scroll.set)
+        tree.grid(row=0, column=0, sticky=tk.NSEW)
+        tree_scroll.grid(row=0, column=1, sticky=tk.NS)
+        tree.bind("<Button-1>", self._soundalike_click)
+        tree.bind("<space>", self._soundalike_space)
+        self._soundalike_tree = tree
+        self._soundalike_rows = {}
+
+        search_button = ttk.Button(body, text="찾기", command=self._search_soundalikes)
+        search_button.grid(row=2, column=0, sticky=tk.EW, pady=(8, 0))
+        self._soundalike_search_button = search_button
+        actions = ttk.Frame(body)
+        actions.grid(row=2, column=1, sticky=tk.EW, padx=(12, 0), pady=(8, 0))
+        self._soundalike_status = tk.StringVar(value="찾을 용어를 확인하고 '찾기'를 누르세요.")
+        ttk.Label(actions, textvariable=self._soundalike_status).pack(side=tk.LEFT)
+        ttk.Button(actions, text="닫기", command=self._close_soundalikes).pack(side=tk.RIGHT)
+        ttk.Button(
+            actions, text="체크한 것을 고쳐 쓰기에 추가", command=self._add_checked_soundalikes
+        ).pack(side=tk.RIGHT, padx=(0, 6))
+        window.protocol("WM_DELETE_WINDOW", self._close_soundalikes)
+        window.bind("<Escape>", lambda _event: self._close_soundalikes())
+        terms.focus_set()
+
+    def _default_soundalike_terms(self) -> str:
+        if self.settings.soundalike_terms_text.strip():
+            return self.settings.soundalike_terms_text
+        # 처음에는 용어집과 고쳐 쓰기의 바른 꼴을 채워 둡니다.
+        terms = list(normalize_glossary(self.glossary_text.get("1.0", "end-1c")))
+        terms += [item.right for item in parse_corrections(self.corrections_text.get("1.0", "end-1c"))]
+        return "\n".join(dict.fromkeys(terms))
+
+    def _close_soundalikes(self) -> None:
+        window = self._soundalike_window
+        if window is not None and window.winfo_exists():
+            self.settings.soundalike_terms_text = self._soundalike_terms.get("1.0", "end-1c")
+            window.destroy()
+        self._soundalike_window = None
+
+    def _search_soundalikes(self) -> None:
+        terms_text = self._soundalike_terms.get("1.0", "end-1c")
+        self.settings.soundalike_terms_text = terms_text
+        self._apply_settings()
+        terms = [line.strip() for line in terms_text.splitlines() if line.strip()]
+        if not terms:
+            self._soundalike_status.set("찾을 바른 용어를 한 줄에 하나씩 적으세요.")
+            return
+        files = sorted({path for entry in self.entries.values() for path in entry.existing_outputs})
+        if not files:
+            self._soundalike_status.set("지금 폴더에 결과 파일(TXT·SRT)이 없습니다.")
+            return
+        skip = [
+            " ".join(item.wrong)
+            for item in parse_corrections(self.corrections_text.get("1.0", "end-1c"))
+        ]
+        self._soundalike_search_button.configure(state=tk.DISABLED)
+        self._soundalike_status.set(f"결과 파일 {len(files)}개에서 찾는 중…")
+        outcome: list[object] = []
+
+        def work() -> None:
+            try:
+                lines = [line for path in files for line in output_lines(path)]
+                outcome.append(find_soundalikes(terms, lines, skip=skip))
+            except Exception as exc:  # noqa: BLE001 - 창에 알리고 끝냅니다.
+                outcome.append(exc)
+
+        threading.Thread(target=work, name="soundalike-search", daemon=True).start()
+        window = self._soundalike_window
+
+        def finish() -> None:
+            if window is None or not window.winfo_exists():
+                return
+            if not outcome:
+                window.after(100, finish)
+                return
+            self._soundalike_search_button.configure(state=tk.NORMAL)
+            result = outcome[0]
+            if isinstance(result, Exception):
+                self._soundalike_status.set(f"찾지 못했습니다: {result}")
+                return
+            self._show_soundalikes(result, len(files))  # type: ignore[arg-type]
+
+        window.after(100, finish)
+
+    def _show_soundalikes(self, suggestions: list[Suggestion], file_count: int) -> None:
+        tree = self._soundalike_tree
+        tree.delete(*tree.get_children())
+        self._soundalike_rows = {}
+        for number, item in enumerate(suggestions):
+            iid = str(number)
+            self._soundalike_rows[iid] = item
+            tree.insert(
+                "", tk.END, iid=iid, values=("☐", item.term, item.wrong, item.count, item.example)
+            )
+        if suggestions:
+            self._soundalike_status.set(
+                f"결과 파일 {file_count}개에서 비슷한 꼴 {len(suggestions)}개를 찾았습니다."
+            )
+        else:
+            self._soundalike_status.set(f"결과 파일 {file_count}개에서 비슷한 꼴을 찾지 못했습니다.")
+
+    def _toggle_soundalike(self, iid: str) -> None:
+        tree = self._soundalike_tree
+        if iid not in self._soundalike_rows:
+            return
+        values = list(tree.item(iid, "values"))
+        values[0] = "☐" if values[0] == "☑" else "☑"
+        tree.item(iid, values=values)
+
+    def _soundalike_click(self, event: tk.Event) -> None:
+        tree = self._soundalike_tree
+        if tree.identify_region(event.x, event.y) != "cell":
+            return
+        iid = tree.identify_row(event.y)
+        if iid:
+            tree.focus(iid)
+            tree.selection_set(iid)
+            self._toggle_soundalike(iid)
+
+    def _soundalike_space(self, _event: tk.Event) -> str:
+        focused = self._soundalike_tree.focus()
+        if focused:
+            self._toggle_soundalike(focused)
+        return "break"
+
+    def _add_checked_soundalikes(self) -> None:
+        tree = self._soundalike_tree
+        checked = [iid for iid in tree.get_children() if tree.item(iid, "values")[0] == "☑"]
+        if not checked:
+            self._soundalike_status.set("고쳐 쓰기에 넣을 꼴을 먼저 체크하세요.")
+            return
+        lines = [
+            format_correction(self._soundalike_rows[iid].wrong, self._soundalike_rows[iid].term)
+            for iid in checked
+        ]
+        current = self.corrections_text.get("1.0", "end-1c").rstrip("\n")
+        self.corrections_text.delete("1.0", tk.END)
+        self.corrections_text.insert("1.0", "\n".join([current, *lines] if current else lines) + "\n")
+        self._update_corrections_count()
+        self._apply_settings()
+        for iid in checked:
+            tree.delete(iid)
+            del self._soundalike_rows[iid]
+        self._soundalike_status.set(
+            f"{len(checked)}개를 고쳐 쓰기에 추가했습니다. 이미 만든 결과에는 '선택 재생성'으로 적용됩니다."
+        )
 
     def _open_settings(self) -> None:
         window = self._settings_window
@@ -485,7 +736,7 @@ class SubtitleBatcherApp:
         ttk.Label(
             recognition,
             text="말이 없거나 잡음뿐인 구간에 인식 모델이 지어내는 '다음 영상에서 만나요', "
-            "'잠시 쉬고...', '자막 제공 및 광고를 포함하고 있습니다' 같은 문장과, "
+            "'잠시 쉬고...', '자막 제공 및 협조해 주신 분들께 감사드립니다' 같은 문장과, "
             "같은 말이 계속 되풀이되는 부분을 결과에서 뺍니다. "
             "영상에서는 실제로 말한 것으로 보이는 끝인사는 남깁니다. 뺀 내용은 작업 로그에 남습니다.",
             justify=tk.LEFT,
@@ -565,6 +816,10 @@ class SubtitleBatcherApp:
         self.settings.sort_descending = self._sort_descending
         self.settings.root_directory = self.root_var.get().strip()
         self.settings.glossary_text = self.glossary_text.get("1.0", "end-1c")
+        self.settings.corrections_text = self.corrections_text.get("1.0", "end-1c")
+        window = self._soundalike_window
+        if window is not None and window.winfo_exists():
+            self.settings.soundalike_terms_text = self._soundalike_terms.get("1.0", "end-1c")
         self.settings.window_geometry = self.root.geometry()
         self.settings.audio_txt_timestamps = bool(self.audio_timestamp_var.get())
 
@@ -959,6 +1214,7 @@ class SubtitleBatcherApp:
 
     def _launch(self, ordered: list[str], mode: JobMode) -> bool:
         glossary = normalize_glossary(self.glossary_text.get("1.0", "end-1c"))
+        corrections = parse_corrections(self.corrections_text.get("1.0", "end-1c"))
         audio_txt_timestamps = bool(self.audio_timestamp_var.get())
         auto_full_large = bool(self.auto_full_large_var.get())
         filter_hallucinations = bool(self.filter_hallucinations_var.get())
@@ -971,6 +1227,7 @@ class SubtitleBatcherApp:
                 audio_txt_timestamps=audio_txt_timestamps,
                 auto_full_large=auto_full_large,
                 filter_hallucinations=filter_hallucinations,
+                corrections=corrections,
             )
             for iid in ordered
         ]
@@ -1161,6 +1418,16 @@ class SubtitleBatcherApp:
     def _update_glossary_count(self) -> None:
         terms = normalize_glossary(self.glossary_text.get("1.0", "end-1c"))
         self.glossary_count_var.set(f"적용: {len(terms)}/50개, {len(', '.join(terms))}/500자")
+
+    def _update_corrections_count(self) -> None:
+        text = self.corrections_text.get("1.0", "end-1c")
+        corrections = parse_corrections(text)
+        written = [
+            line for line in text.splitlines() if line.strip() and not line.strip().startswith("#")
+        ]
+        skipped = len(written) - len(corrections)
+        note = f", 쓸 수 없는 줄 {skipped}개(화살표 없음·중복 등)" if skipped > 0 else ""
+        self.corrections_count_var.set(f"적용: {len(corrections)}/{MAX_CORRECTIONS}줄{note}")
 
     def _on_close(self) -> None:
         if self.controller.busy and not messagebox.askyesno(

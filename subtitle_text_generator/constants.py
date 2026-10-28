@@ -5,7 +5,7 @@ from dataclasses import dataclass
 APP_NAME = "SubtitleTextGenerator"
 LEGACY_APP_NAME = "LectureSubtitleBatcher"
 APP_DISPLAY_NAME = "영상·녹음 자막 텍스트 생성기"
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.8.0"
 
 DEFAULT_ROOT = ""
 VIDEO_EXTENSIONS = frozenset(

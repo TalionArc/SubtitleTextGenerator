@@ -25,6 +25,8 @@ def test_settings_round_trip(tmp_path: Path) -> None:
     expected = Settings(
         root_directory=str(tmp_path),
         glossary_text="용어",
+        corrections_text="파이선 → 파이썬",
+        soundalike_terms_text="파이썬\n도커",
         window_geometry="1000x700",
         audio_txt_timestamps=False,
         skip_setup_prompt=True,

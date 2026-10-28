@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .app_paths import AppPaths
 from .constants import APP_VERSION, LARGE_MODEL, TURBO_MODEL
+from .corrections import apply_corrections
 from .engine import EngineCancelled, EngineExecutionError, EngineRun, EngineRunner, clip_argument
 from .hallucination import filter_hallucinations
 from .models import JobMode, JobRequest, JobResult, JobStatus, MediaKind, RefineWindow, Transcript
@@ -215,6 +216,11 @@ class JobProcessor:
                 final_transcript, source_kind, log_path
             )
             message += filter_note
+        if request.corrections:
+            final_transcript, correction_note = self._apply_corrections(
+                final_transcript, request, log_path
+            )
+            message += correction_note
         allow_replace = request.mode in {JobMode.REPROCESS, JobMode.FULL_LARGE}
         if source_kind is MediaKind.AUDIO:
             timestamp_label = "타임스탬프 포함" if request.audio_txt_timestamps else "타임스탬프 제외"
@@ -262,6 +268,17 @@ class JobProcessor:
                     f"{format_txt_timestamp(item.start)} {item.reason}: {item.text[:80]}",
                 )
         return filtered, f" 헛소리 {len(removed)}곳을 걸렀습니다."
+
+    def _apply_corrections(
+        self, transcript: Transcript, request: JobRequest, log_path: Path
+    ) -> tuple[Transcript, str]:
+        corrected, counts = apply_corrections(transcript, request.corrections)
+        if not counts:
+            return transcript, ""
+        with suppress(OSError):
+            for label, count in counts.most_common():
+                self._append_log(log_path, "correct", f"{label}: {count}곳")
+        return corrected, f" 용어 {sum(counts.values())}곳을 고쳐 썼습니다."
 
     def _run_cached_turbo(
         self,

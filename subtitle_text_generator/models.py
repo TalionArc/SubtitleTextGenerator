@@ -119,6 +119,18 @@ class RefineWindow:
 
 
 @dataclass(frozen=True, slots=True)
+class Correction:
+    """인식이 끝난 뒤 틀린 꼴(낱말 묶음)을 바른 꼴로 바꾸는 고쳐 쓰기 한 줄입니다."""
+
+    wrong: tuple[str, ...]
+    right: str
+
+    @property
+    def label(self) -> str:
+        return f"{' '.join(self.wrong)} → {self.right}"
+
+
+@dataclass(frozen=True, slots=True)
 class JobRequest:
     video: Path
     root: Path
@@ -127,6 +139,7 @@ class JobRequest:
     audio_txt_timestamps: bool = True
     auto_full_large: bool = True
     filter_hallucinations: bool = True
+    corrections: tuple[Correction, ...] = ()
 
 
 @dataclass(slots=True)

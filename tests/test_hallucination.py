@@ -77,6 +77,36 @@ def test_subtitle_credit_is_removed_even_from_videos() -> None:
     assert removed == []
 
 
+def test_subtitle_thanks_credit_and_its_cut_off_forms_are_removed() -> None:
+    transcript = _transcript(
+        (0.0, "설명은 여기까지입니다.", 0.95),
+        (2.0, "자막 제공 및 협조해 주신 모든 분들께 진심으로 감사드립니다.", 0.95),
+        (8.0, "자막 제공 자막 및 협조해", 0.95),
+        (12.0, "제공 주신 모든 분들께 진심으로 감사드립니다.", 0.95),
+        (18.0, "및 주신 모든 분들께 진심으로", 0.95),
+        (24.0, "광고를 포함하고 있습니다.", 0.95),
+        (28.0, "그리고 우리는 다시 돌아왔습니다.", 0.3),
+        (32.0, "질문 있나요?", 0.95),
+    )
+    for video in (False, True):
+        filtered, removed = filter_hallucinations(transcript, video=video)
+        assert _text(filtered) == "설명은 여기까지입니다.\r\n질문 있나요?\r\n"
+        assert len(removed) == 6
+
+
+def test_real_thanks_without_subtitle_words_is_kept() -> None:
+    transcript = _transcript(
+        (0.0, "발표 끝났습니다.", 0.95),
+        (2.0, "진심으로 감사드립니다.", 0.95),
+        (40.0, "모든 분들께 감사드립니다.", 0.95),
+        (80.0, "이 파일은 오류를", 0.95),
+        (83.0, "포함하고 있습니다.", 0.95),
+    )
+    filtered, removed = filter_hallucinations(transcript, video=False)
+    assert filtered is transcript
+    assert removed == []
+
+
 def test_phrase_words_inside_a_real_sentence_are_kept() -> None:
     transcript = _transcript(
         (0.0, "다음 영상에서 보여 드릴게요.", 0.5),
